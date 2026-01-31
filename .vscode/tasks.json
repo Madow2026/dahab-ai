@@ -1,0 +1,163 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Kill running worker (python worker.py)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location \"d:\\APP\\gold ai\"; $procs = Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine -match 'worker\\.py' }; if (-not $procs) { Write-Host 'No worker.py process found.'; exit 0 }; $procs | Select-Object ProcessId,CommandLine | Format-Table -AutoSize | Out-String -Width 500 | Write-Host; foreach ($p in $procs) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; Write-Host \"Stopped PID $($p.ProcessId)\" } catch { Write-Host \"Failed to stop PID $($p.ProcessId): $($_.Exception.Message)\" } }"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Kill running worker (retry)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& { Set-Location 'd:\\APP\\gold ai'; $procs = Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine -match 'worker\\.py' }; if (-not $procs) { Write-Host 'No worker.py process found.'; exit 0 }; $procs | Select-Object ProcessId,CommandLine | Format-Table -AutoSize | Out-String -Width 500 | Write-Host; foreach ($p in $procs) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; Write-Host ('Stopped PID ' + $p.ProcessId) } catch { Write-Host ('Failed to stop PID ' + $p.ProcessId + ': ' + $_.Exception.Message) } } }"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Task arg sanity",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Date"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Kill worker (simple)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$procs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*worker.py*' }; if (-not $procs) { Write-Host 'No worker.py process found.'; exit 0 }; $procs | Select-Object ProcessId,CommandLine | Format-Table -AutoSize | Out-String -Width 400 | Write-Host; foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force; Write-Host ('Stopped PID ' + $p.ProcessId) }"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Kill worker (direct PS)",
+			"type": "shell",
+			"command": "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*worker.py*' }; if (-not $procs) { Write-Host 'No worker.py process found.'; exit 0 }; $procs | Select-Object ProcessId,CommandLine | Format-Table -AutoSize | Out-String -Width 400 | Write-Host; foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force; Write-Host ('Stopped PID ' + $p.ProcessId) }",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity 1 - py_compile all",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python -c \"import os,py_compile,sys; root=r'd:\\\\APP\\\\gold ai'; errs=[]\nfor dp, dns, fns in os.walk(root):\n    if '\\\\\\\\.venv\\\\\\\\' in dp: continue\n    for fn in fns:\n        if fn.endswith('.py'):\n            p=os.path.join(dp,fn)\n            try: py_compile.compile(p,doraise=True)\n            except Exception as e: errs.append((p,str(e)))\nprint('py_compile_ok', len(errs)==0); print('error_count', len(errs));\n[print('ERROR',e[0],'\\n ',e[1]) for e in errs[:10]]\nsys.exit(1 if errs else 0)\"",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity 1 - py_compile all (script)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_py_compile.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity 2 - worker --once",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python worker.py --once",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity 3 - DB counts + evaluation sanity",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_db_counts.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity 3 - DB counts + evaluation sanity (retry)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_db_counts.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - worker --once (post eval changes)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python worker.py --once",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - DB counts + eval sanity",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_db_counts.py",
+			"isBackground": false
+		},
+		{
+			"label": "Check due_at min/max + count due (raw)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python -c \"import os,sys; sys.path.insert(0, os.getcwd()); from db.db import get_db; db=get_db(); c=db.get_connection().cursor(); c.execute('SELECT COUNT(*) FROM forecasts'); print('forecasts', c.fetchone()[0]); c.execute('SELECT MIN(due_at), MAX(due_at) FROM forecasts'); print('due_min_max', c.fetchone()); c.execute(\\\"SELECT COUNT(*) FROM forecasts WHERE status='active' AND due_at IS NOT NULL AND due_at != ''\\\"); print('active_with_due', c.fetchone()[0]); c.execute(\\\"SELECT COUNT(*) FROM forecasts WHERE status='active' AND due_at IS NOT NULL AND due_at != '' AND datetime(replace(substr(due_at,1,19),'T',' ')) <= datetime('now')\\\"); print('active_due_now', c.fetchone()[0]); c.execute(\\\"SELECT COUNT(*) FROM forecasts WHERE status='active' AND due_at IS NOT NULL AND due_at != '' AND datetime(replace(substr(due_at,1,19),'T',' ')) <= datetime('now','+12 hours')\\\"); print('active_due_within_12h', c.fetchone()[0]);\"",
+			"isBackground": false
+		},
+		{
+			"label": "Inspect forecasts due distribution",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\inspect_forecasts_due.py",
+			"isBackground": false
+		},
+		{
+			"label": "Manual evaluation now (scripted)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python -c \"import os,sys; sys.path.insert(0, os.getcwd()); from db.db import get_db; db=get_db(); print(db.evaluate_due_forecasts_backfill(max_window_hours=6))\"",
+			"isBackground": false
+		},
+		{
+			"label": "Manual evaluation now (script)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\run_eval_now.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - py_compile (post tweaks)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_py_compile.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - worker --once (eval always)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python worker.py --once",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - DB counts + eval sanity (after --once)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_db_counts.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - news DB stats",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python -c \"import sqlite3,os; p=os.path.join(r'd:\\\\APP\\\\gold ai','dahab_ai.db'); c=sqlite3.connect(p); cur=c.cursor(); cur.execute('select count(*) from news'); print('news_count', cur.fetchone()[0]); cur.execute('select max(fetched_at) from news'); print('max_fetched_at', cur.fetchone()[0]); cur.execute('select source, count(*) from news group by source order by count(*) desc'); print('by_source', cur.fetchall()[:10]); cur.execute('select id,source,fetched_at,substr(title_en,1,80),url from news order by id desc limit 5'); print('latest_5', cur.fetchall()); c.close()\"",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - news DB stats (script)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_news_db.py",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - news DB stats (script, compact)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python -c \"import sqlite3,os; p=os.path.join(r'd:\\\\APP\\\\gold ai','dahab_ai.db'); c=sqlite3.connect(p); cur=c.cursor(); cur.execute('select count(*) from news'); print('news_count',cur.fetchone()[0]); cur.execute('select max(fetched_at) from news'); print('max_fetched_at',cur.fetchone()[0]); cur.execute('select source,count(*) from news group by source order by count(*) desc'); print('by_source',cur.fetchall()); c.close()\"",
+			"isBackground": false
+		},
+		{
+			"label": "Sanity - news DB stats (file)",
+			"type": "shell",
+			"command": "Set-Location 'd:\\APP\\gold ai'; .\\.venv\\Scripts\\python scripts\\sanity_news_db.py",
+			"isBackground": false
+		}
+	]
+}

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+*.log
+output/
+.cache/
+.streamlit/secrets.toml
+.env
+worker.lock
+*.lock
