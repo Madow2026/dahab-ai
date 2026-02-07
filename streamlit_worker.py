@@ -176,10 +176,10 @@ class StreamlitWorker:
                 body_ar = translated['body_ar']
                 
                 # Impact analysis
-                impact_analysis = self.impact_engine.analyze_impact(
-                    item['title_en'], 
-                    item['body_en']
-                )
+                impact_analysis = self.impact_engine.analyze_news({
+                    'title_en': item['title_en'],
+                    'body_en': item['body_en']
+                })
                 
                 # Store in database
                 self.db.insert_news({
