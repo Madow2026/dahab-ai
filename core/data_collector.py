@@ -86,16 +86,23 @@ class NewsCollector:
         return news_items
     
     def _is_economic_news(self, title: str, content: str) -> bool:
-        """Check if news is economic/financial"""
+        """Check if news is economic/financial including political events affecting markets"""
         text = (title + " " + content).lower()
         
         economic_keywords = [
+            # Core economic terms
             'economy', 'economic', 'fed', 'federal reserve', 'interest rate',
             'inflation', 'gdp', 'employment', 'unemployment', 'jobs',
             'central bank', 'ecb', 'monetary', 'fiscal',
             'gold', 'silver', 'oil', 'dollar', 'usd', 'forex',
             'bitcoin', 'crypto', 'market', 'stock', 'trade',
-            'treasury', 'bond', 'yield'
+            'treasury', 'bond', 'yield',
+            # Political and geopolitical terms affecting markets
+            'election', 'politics', 'political', 'government', 'sanction',
+            'tariff', 'war', 'conflict', 'tension', 'crisis', 'opec',
+            'regulation', 'tax', 'budget', 'deficit', 'china', 'russia',
+            'ukraine', 'middle east', 'iran', 'geopolitical', 'treaty',
+            'diplomacy', 'energy policy', 'trade war', 'embargo'
         ]
         
         return any(keyword in text for keyword in economic_keywords)

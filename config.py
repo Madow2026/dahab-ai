@@ -199,6 +199,36 @@ NEWS_SOURCES = {
     'bloomberg_economics': {
         'url': 'https://feeds.bloomberg.com/economics/news.rss',
         'reliability': 0.9
+    },
+    
+    # Political & Geopolitical News Affecting Markets
+    'reuters_world': {
+        'url': 'https://www.reutersagency.com/feed/?taxonomy=best-regions&post_type=best',
+        'reliability': 0.9
+    },
+    'reuters_politics': {
+        'url': 'https://www.reuters.com/rssfeed/worldNews',
+        'reliability': 0.9
+    },
+    'ap_politics': {
+        'url': 'https://apnews.com/hub/politics/feed',
+        'reliability': 0.85
+    },
+    'bbc_world': {
+        'url': 'http://feeds.bbci.co.uk/news/world/rss.xml',
+        'reliability': 0.9
+    },
+    'politico': {
+        'url': 'https://www.politico.com/rss/politics08.xml',
+        'reliability': 0.8
+    },
+    'aljazeera_economy': {
+        'url': 'https://www.aljazeera.com/xml/rss/all.xml',
+        'reliability': 0.8
+    },
+    'cnbc_politics': {
+        'url': 'https://www.cnbc.com/id/10000113/device/rss/rss.html',
+        'reliability': 0.85
     }
 }
 

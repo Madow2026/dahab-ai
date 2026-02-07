@@ -15,6 +15,12 @@ import importlib
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from db.db import get_db
+from streamlit_worker import ensure_worker_running
+
+st.set_page_config(page_title="Paper Portfolio", page_icon="💼", layout="wide")
+
+# Ensure background worker is running
+ensure_worker_running()
 
 
 def _has_matplotlib() -> bool:
@@ -29,7 +35,6 @@ def _has_matplotlib() -> bool:
     except Exception:
         return False
 
-st.set_page_config(page_title="Paper Portfolio", page_icon="💼", layout="wide")
 
 st.title("💼 Paper Portfolio Simulation")
 st.caption("Virtual $1,000 portfolio for educational trading simulation")

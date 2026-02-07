@@ -114,11 +114,12 @@ class NewsIngestion:
             return []
     
     def _is_economic_news(self, title: str, body: str) -> bool:
-        """Check if news is economic/financial"""
+        """Check if news is economic/financial including political events affecting markets"""
         text = (title + " " + body).lower()
         
-        # Extended economic keywords
+        # Extended economic keywords including political and geopolitical terms
         economic_keywords = [
+            # Core economic terms
             'economy', 'economic', 'fed', 'federal reserve', 'interest rate',
             'inflation', 'gdp', 'employment', 'unemployment', 'jobs', 'payroll',
             'central bank', 'ecb', 'monetary', 'fiscal', 'policy',
@@ -126,7 +127,22 @@ class NewsIngestion:
             'bitcoin', 'crypto', 'cryptocurrency', 'market', 'stock', 'trade',
             'treasury', 'bond', 'yield', 'price', 'recession', 'growth',
             'manufacturing', 'retail sales', 'consumer', 'producer',
-            'housing', 'construction', 'data', 'report', 'survey'
+            'housing', 'construction', 'data', 'report', 'survey',
+            # Political and geopolitical terms affecting markets
+            'election', 'politics', 'political', 'government', 'congress', 'senate',
+            'president', 'white house', 'administration', 'parliament', 'legislation',
+            'sanction', 'sanctions', 'tariff', 'tariffs', 'trade war', 'embargo',
+            'war', 'conflict', 'military', 'tension', 'crisis', 'instability',
+            'peace', 'treaty', 'agreement', 'diplomacy', 'diplomatic',
+            'opec', 'energy policy', 'regulation', 'regulatory', 'tax', 'taxation',
+            'budget', 'spending', 'deficit', 'debt ceiling', 'shutdown',
+            'referendum', 'brexit', 'independence', 'sovereignty',
+            'protest', 'unrest', 'revolution', 'coup', 'regime',
+            'china', 'russia', 'ukraine', 'middle east', 'iran', 'israel',
+            'taiwan', 'north korea', 'eu', 'european union', 'g7', 'g20',
+            'imf', 'world bank', 'united nations', 'un', 'nato',
+            'reserve', 'commodity', 'energy', 'pipeline', 'supply chain',
+            'geopolitical', 'geopolitics', 'sovereignty', 'alliance'
         ]
         
         # Count keyword matches

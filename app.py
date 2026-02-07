@@ -4,6 +4,7 @@ Main Entry Point
 """
 
 import streamlit as st
+from streamlit_worker import ensure_worker_running
 
 # Page configuration
 st.set_page_config(
@@ -12,6 +13,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Start background worker automatically
+ensure_worker_running()
 
 # Custom CSS for professional dark theme
 st.markdown("""

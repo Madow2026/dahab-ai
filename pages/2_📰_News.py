@@ -14,8 +14,12 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from db.db import get_db
+from streamlit_worker import ensure_worker_running
 
 st.set_page_config(page_title="Economic News", page_icon="📰", layout="wide")
+
+# Ensure background worker is running
+ensure_worker_running()
 
 # Auto-refresh every 30 seconds
 if 'last_refresh_news' not in st.session_state:
