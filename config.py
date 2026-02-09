@@ -64,8 +64,8 @@ FORECAST_HORIZONS = {
     'gdp': 1440,  # 1 day
     'energy': 60,  # 1 hour
     'geopolitics': 240,
-    'crypto': 60,
-    'general': 240
+    'crypto': 15,  # 15 minutes (fast-moving)
+    'general': 15,  # 15 minutes (short-term)
 }
 
 # Impact strength thresholds
