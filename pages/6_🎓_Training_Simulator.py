@@ -1028,14 +1028,17 @@ def render_evaluated_recommendations(session_id: int, current_prices: Dict[str, 
         # Learning insights
         learning_data = training_db.learn_from_results(session_id)
         
-        if learning_data:
+        # Filter out _overall_ keys that don't have asset/action
+        asset_learning = {k: v for k, v in learning_data.items() if not k.startswith('_overall_')}
+        
+        if asset_learning:
             st.markdown("---")
             st.markdown("### 🧠 AI Learning Insights")
             st.caption("The AI adjusts future recommendations based on these results")
             
-            cols = st.columns(len(learning_data))
-            for idx, (key, data) in enumerate(learning_data.items()):
-                with cols[idx]:
+            cols = st.columns(min(len(asset_learning), 5))
+            for idx, (key, data) in enumerate(asset_learning.items()):
+                with cols[idx % len(cols)]:
                     color = '#00d4aa' if data['success_rate'] >= 60 else '#f39c12' if data['success_rate'] >= 40 else '#e74c3c'
                     st.markdown(f"""
                     <div style='text-align: center; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 8px;'>
