@@ -711,8 +711,22 @@ def render_ai_recommendations(session_id: int, current_prices: Dict[str, float])
     # Auto-evaluate expired recommendations
     evaluated_count = training_db.auto_evaluate_expired_recommendations(session_id, current_prices)
     
-    # Get active recommendations
+    # AUTO-GENERATE recommendations if none exist or very few
     active_recs = training_db.get_active_recommendations(session_id)
+    if len(active_recs) < 2:  # Keep at least 2 recommendations active
+        # Get price history for analysis
+        price_history = {}
+        for asset in current_prices.keys():
+            price_history[asset] = get_price_history(asset, hours=1)
+        
+        # Generate recommendations silently
+        new_recs = training_db.generate_ai_recommendations(
+            session_id, current_prices, price_history, max_recommendations=5
+        )
+        
+        if new_recs:
+            # Refresh to show new recommendations
+            active_recs = training_db.get_active_recommendations(session_id)
     
     # Get recommendation stats
     stats = training_db.get_recommendation_stats(session_id)
@@ -750,40 +764,76 @@ def render_ai_recommendations(session_id: int, current_prices: Dict[str, float])
         
         st.markdown("---")
     
-    # Button to generate new recommendations
-    col_gen, col_refresh = st.columns([1, 1])
+    # FILTERS for recommendations
+    st.markdown("**🔍 Filter Recommendations:**")
+    col_action, col_asset, col_more, col_refresh = st.columns([1, 2, 1, 1])
     
-    with col_gen:
-        if st.button("🎲 Generate AI Recommendations", type="primary", use_container_width=True):
-            # Get price history for analysis
+    with col_action:
+        action_filter = st.selectbox(
+            "Action",
+            options=['All', 'BUY Only 📈', 'SELL Only 📉'],
+            key='rec_action_filter'
+        )
+    
+    with col_asset:
+        asset_filter = st.multiselect(
+            "Assets",
+            options=['Gold', 'Silver', 'Oil', 'Bitcoin', 'USD Index'],
+            default=['Gold', 'Silver', 'Oil', 'Bitcoin', 'USD Index'],
+            key='rec_asset_filter'
+        )
+    
+    with col_more:
+        st.markdown("<br>", unsafe_allow_html=True)  # Spacer
+        if st.button("➕ More", use_container_width=True, help="Generate additional recommendations"):
             price_history = {}
             for asset in current_prices.keys():
                 price_history[asset] = get_price_history(asset, hours=1)
-            
-            # Generate recommendations
             new_recs = training_db.generate_ai_recommendations(
                 session_id, current_prices, price_history, max_recommendations=3
             )
-            
             if new_recs:
-                st.success(f"✨ Generated {len(new_recs)} new recommendations!")
+                st.success(f"✨ Added {len(new_recs)} recommendations!")
                 st.rerun()
-            else:
-                st.info("No new recommendations at this time. Market conditions not suitable.")
     
     with col_refresh:
+        st.markdown("<br>", unsafe_allow_html=True)  # Spacer
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
     
     st.markdown("---")
     
+    # Apply filters
+    filtered_recs = active_recs
+    
+    # Filter by action
+    if action_filter == 'BUY Only 📈':
+        filtered_recs = [r for r in filtered_recs if r['action'] == 'BUY']
+    elif action_filter == 'SELL Only 📉':
+        filtered_recs = [r for r in filtered_recs if r['action'] == 'SELL']
+    
+    # Filter by asset
+    if asset_filter:
+        filtered_recs = [r for r in filtered_recs if r['asset'] in asset_filter]
+    
     # Display active recommendations
-    if not active_recs:
-        st.info("📭 No active recommendations. Click 'Generate AI Recommendations' to get trading suggestions.")
+    if not filtered_recs:
+        if not active_recs:
+            st.info("📭 Generating recommendations automatically... Please refresh in a moment.")
+        else:
+            st.info(f"📭 No recommendations match your filters. {len(active_recs)} recommendations available with different criteria.")
     else:
-        st.markdown(f"**🔔 {len(active_recs)} Active Recommendations:**")
+        # Summary of filtered recommendations
+        buy_count = sum(1 for r in filtered_recs if r['action'] == 'BUY')
+        sell_count = sum(1 for r in filtered_recs if r['action'] == 'SELL')
         
-        for rec in active_recs:
+        st.markdown(f"""
+        **🔔 {len(filtered_recs)} Active Recommendations** (of {len(active_recs)} total)  
+        <span style='color: #00d4aa;'>🟢 {buy_count} BUY</span> | 
+        <span style='color: #e74c3c;'>🔴 {sell_count} SELL</span>
+        """, unsafe_allow_html=True)
+        
+        for rec in filtered_recs:
             # Calculate time remaining
             expires_at = datetime.fromisoformat(rec['expires_at'])
             time_remaining = expires_at - datetime.now()
@@ -874,9 +924,10 @@ def render_ai_recommendations(session_id: int, current_prices: Dict[str, float])
     # Educational note
     st.markdown("""
     <div class='tip-box'>
-        <strong>📚 Learning Note:</strong> These recommendations are generated by analyzing price momentum, 
-        volatility, and historical patterns. Compare the AI's predictions with actual outcomes to understand 
-        which signals are reliable. Track the accuracy rate above to see how well the AI performs!
+        <strong>📚 Learning Note:</strong> Recommendations are generated <strong>automatically</strong> when needed! 
+        The AI constantly monitors price patterns and creates new trading suggestions when it detects opportunities. 
+        Use the filters above to focus on specific assets or actions (BUY/SELL). The system maintains 2-5 active 
+        recommendations at all times, learning from each result to improve future predictions.
     </div>
     """, unsafe_allow_html=True)
     
