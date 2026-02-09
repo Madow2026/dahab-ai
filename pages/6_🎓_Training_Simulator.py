@@ -605,32 +605,35 @@ def render_trade_history(session_id: int):
 
 
 def get_price_history(asset: str, hours: int = 2) -> List[float]:
-    """Get recent price history for an asset from main database"""
-    main_db = get_db()
-    conn = main_db.get_connection()
-    cursor = conn.cursor()
+    """Get recent price history for an asset - simulated for training"""
+    # Get current price as baseline
+    current_prices = get_current_prices()
+    current = current_prices.get(asset, 100)
     
-    # Get historical prices
-    since = (datetime.now() - timedelta(hours=hours)).isoformat()
-    cursor.execute("""
-        SELECT price, timestamp FROM market_data
-        WHERE asset = ? AND timestamp > ?
-        ORDER BY timestamp ASC
-    """, (asset, since))
+    # Generate realistic simulated price history
+    # This is intentionally simulated since training simulator is educational
+    history = []
+    num_points = 30
     
-    rows = cursor.fetchall()
-    conn.close()
+    # Create a trending pattern with some noise
+    trend_direction = (hash(asset) % 3 - 1)  # -1, 0, or 1
+    trend_strength = 0.0005  # 0.05% per point
     
-    if rows:
-        return [row['price'] for row in rows]
-    else:
-        # Fallback: simulate price history
-        current = get_current_prices().get(asset, 100)
-        history = []
-        for i in range(20):
-            noise = (hash(f"{asset}{i}") % 100 - 50) / 1000
-            history.append(current * (1 + noise))
-        return history
+    for i in range(num_points):
+        # Calculate price at this point (going backwards in time)
+        reverse_i = num_points - i - 1
+        
+        # Trend component
+        trend = current * (1 - trend_direction * trend_strength * reverse_i)
+        
+        # Random noise (±0.5%)
+        noise_seed = hash(f"{asset}{i}{hours}") % 1000
+        noise = (noise_seed - 500) / 100000
+        
+        price = trend * (1 + noise)
+        history.append(price)
+    
+    return history
 
 
 def render_live_price_charts(current_prices: Dict[str, float]):
