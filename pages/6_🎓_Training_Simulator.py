@@ -605,35 +605,49 @@ def render_trade_history(session_id: int):
 
 
 def get_price_history(asset: str, hours: int = 2) -> List[float]:
-    """Get recent price history for an asset - simulated for training"""
-    # Get current price as baseline
+    """Get recent price history from main DB, with smart fallback"""
+    try:
+        # Try to get REAL price data from main database
+        conn = main_db.get_connection()
+        cursor = conn.cursor()
+        
+        # Get multiple recent prices
+        cursor.execute("""
+            SELECT price, timestamp FROM prices
+            WHERE asset = ?
+            ORDER BY datetime(timestamp) DESC
+            LIMIT 30
+        """, (asset,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if rows and len(rows) >= 2:
+            # Return in chronological order (oldest first)
+            return [float(row['price']) for row in reversed(rows)]
+    except Exception:
+        pass
+    
+    # Fallback: Use current price with time-varying simulation
     current_prices = get_current_prices()
     current = current_prices.get(asset, 100)
     
-    # Generate realistic simulated price history with MORE variation
-    # This is intentionally simulated since training simulator is educational
+    # Use current time to create changing patterns (not static hash)
+    import math
     history = []
-    num_points = 30
+    now_ts = datetime.now().timestamp()
     
-    # Create a trending pattern with MORE noise for better recommendations
-    trend_direction = (hash(asset) % 3 - 1)  # -1, 0, or 1
-    trend_strength = 0.002  # 0.2% per point (increased from 0.05%)
-    
-    for i in range(num_points):
-        # Calculate price at this point (going backwards in time)
-        reverse_i = num_points - i - 1
+    for i in range(30):
+        # Time-based variation that changes every minute
+        t = (now_ts / 60) + i
         
-        # Trend component (stronger)
-        trend = current * (1 - trend_direction * trend_strength * reverse_i)
+        # Multiple waves for realistic movement
+        wave1 = math.sin(t * 0.5) * 0.003
+        wave2 = math.sin(t * 0.17) * 0.005
+        wave3 = math.sin(t * 0.07) * 0.008
         
-        # Random noise (±1.5% - increased from ±0.5%)
-        noise_seed = hash(f"{asset}{i}{hours}") % 1000
-        noise = (noise_seed - 500) / 33333  # More volatility
-        
-        # Add some wave pattern for more interesting charts
-        wave = 0.003 * (i % 5 - 2)  # Small sine-like wave
-        
-        price = trend * (1 + noise + wave)
+        variation = wave1 + wave2 + wave3
+        price = current * (1 + variation)
         history.append(price)
     
     return history

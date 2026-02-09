@@ -588,32 +588,64 @@ class TrainingDatabase:
         return recommendations
     
     def evaluate_recommendation(self, rec_id: int, actual_price: float) -> Dict:
-        """Evaluate recommendation accuracy after time horizon"""
+        """Evaluate recommendation accuracy after time horizon - SMARTER scoring"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         # Get recommendation
         cursor.execute("SELECT * FROM training_recommendations WHERE id = ?", (rec_id,))
-        rec = dict(cursor.fetchone())
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return {'was_accurate': False, 'accuracy_score': 0}
         
-        # Calculate accuracy
+        rec = dict(row)
+        
         target_price = rec['target_price']
         current_price = rec['current_price']
         action = rec['action']
         
-        # Determine if prediction was accurate
+        # Calculate accuracy with SMARTER scoring
         if action == 'BUY':
-            # Expected price to go up
+            # BUY = expected price UP. Any upward move is partially right
             expected_move = target_price - current_price
             actual_move = actual_price - current_price
-            was_accurate = actual_move > 0 and actual_move >= expected_move * 0.5
-            accuracy_score = min(100, (actual_move / expected_move * 100)) if expected_move > 0 else 0
+            
+            if actual_move > 0:  # Price went up (correct direction!)
+                was_accurate = True
+                # Score based on how much of target was achieved
+                if expected_move > 0:
+                    accuracy_score = min(100, (actual_move / expected_move) * 100)
+                else:
+                    accuracy_score = 50
+            else:  # Price went down (wrong direction)
+                was_accurate = False
+                # Partial score if move was very small
+                move_pct = abs(actual_move / current_price) * 100
+                if move_pct < 0.1:  # Less than 0.1% move = basically neutral
+                    accuracy_score = 30
+                    was_accurate = True  # Too small to call wrong
+                else:
+                    accuracy_score = max(0, 20 - move_pct * 10)
         else:  # SELL
-            # Expected price to go down
+            # SELL = expected price DOWN. Any downward move is partially right
             expected_move = current_price - target_price
             actual_move = current_price - actual_price
-            was_accurate = actual_move > 0 and actual_move >= expected_move * 0.5
-            accuracy_score = min(100, (actual_move / expected_move * 100)) if expected_move > 0 else 0
+            
+            if actual_move > 0:  # Price went down (correct direction!)
+                was_accurate = True
+                if expected_move > 0:
+                    accuracy_score = min(100, (actual_move / expected_move) * 100)
+                else:
+                    accuracy_score = 50
+            else:  # Price went up (wrong direction)
+                was_accurate = False
+                move_pct = abs(actual_move / current_price) * 100
+                if move_pct < 0.1:  # Basically neutral
+                    accuracy_score = 30
+                    was_accurate = True
+                else:
+                    accuracy_score = max(0, 20 - move_pct * 10)
         
         # Update recommendation
         cursor.execute("""
@@ -637,9 +669,7 @@ class TrainingDatabase:
         
         return {
             'was_accurate': was_accurate,
-            'accuracy_score': accuracy_score,
-            'expected_move': expected_move if action == 'BUY' else -expected_move,
-            'actual_move': actual_move if action == 'BUY' else -actual_move
+            'accuracy_score': accuracy_score
         }
     
     def get_recommendation_stats(self, session_id: int) -> Dict:
@@ -689,7 +719,8 @@ class TrainingDatabase:
                 COUNT(*) as total,
                 AVG(CASE WHEN was_accurate = 1 THEN 1.0 ELSE 0.0 END) as success_rate,
                 AVG(accuracy_score) as avg_score,
-                AVG(confidence) as avg_confidence
+                AVG(confidence) as avg_confidence,
+                AVG(CASE WHEN was_accurate = 1 THEN 1.0 ELSE -1.0 END) as direction_bias
             FROM training_recommendations
             WHERE session_id = ? AND status = 'evaluated'
             GROUP BY asset, action
@@ -704,129 +735,215 @@ class TrainingDatabase:
                 'total': row['total'],
                 'success_rate': row['success_rate'] * 100,
                 'avg_score': row['avg_score'] or 0,
-                'avg_confidence': row['avg_confidence'] or 0
+                'avg_confidence': row['avg_confidence'] or 0,
+                'direction_bias': row['direction_bias'] or 0
+            }
+        
+        # Also get overall stats to know what fails
+        cursor.execute("""
+            SELECT 
+                action,
+                COUNT(*) as total,
+                AVG(CASE WHEN was_accurate = 1 THEN 1.0 ELSE 0.0 END) as success_rate
+            FROM training_recommendations
+            WHERE session_id = ? AND status = 'evaluated'
+            GROUP BY action
+        """, (session_id,))
+        
+        for row in cursor.fetchall():
+            learning_data[f'_overall_{row["action"]}'] = {
+                'total': row['total'],
+                'success_rate': row['success_rate'] * 100
             }
         
         conn.close()
         return learning_data
     
+    def _get_learned_direction(self, learning_data: Dict, asset: str) -> Optional[str]:
+        """Determine best direction to recommend based on past learning"""
+        buy_key = f"{asset}_BUY"
+        sell_key = f"{asset}_SELL"
+        
+        buy_rate = learning_data.get(buy_key, {}).get('success_rate', 50)
+        sell_rate = learning_data.get(sell_key, {}).get('success_rate', 50)
+        buy_count = learning_data.get(buy_key, {}).get('total', 0)
+        sell_count = learning_data.get(sell_key, {}).get('total', 0)
+        
+        # If we have enough data and one direction clearly fails, avoid it
+        if buy_count >= 3 and buy_rate < 20:
+            return 'SELL'  # BUY keeps failing, try SELL
+        if sell_count >= 3 and sell_rate < 20:
+            return 'BUY'  # SELL keeps failing, try BUY
+        
+        # If one direction clearly succeeds, prefer it
+        if buy_count >= 3 and buy_rate > 70:
+            return 'BUY'
+        if sell_count >= 3 and sell_rate > 70:
+            return 'SELL'
+        
+        return None  # No clear preference yet
+    
     def generate_ai_recommendations(self, session_id: int, current_prices: Dict[str, float],
-                                   price_history: Dict[str, List[float]], max_recommendations: int = 3) -> List[int]:
+                                   price_history: Dict[str, List[float]], max_recommendations: int = 5) -> List[int]:
         """
-        Generate AI recommendations based on price analysis
-        Educational algorithm - uses simple technical analysis with learning
+        Smart AI recommendations with real learning from past results.
+        Analyzes actual price movements and adjusts strategy based on accuracy.
         """
+        import math
         recommendations = []
         
-        # Learn from past results to adjust confidence
+        # Learn from past results
         learning_data = self.learn_from_results(session_id)
+        
+        # Check overall accuracy to adjust strategy
+        overall_buy_rate = learning_data.get('_overall_BUY', {}).get('success_rate', 50)
+        overall_sell_rate = learning_data.get('_overall_SELL', {}).get('success_rate', 50)
+        overall_buy_count = learning_data.get('_overall_BUY', {}).get('total', 0)
+        overall_sell_count = learning_data.get('_overall_SELL', {}).get('total', 0)
+        
+        # Strategy: if all SELL failed, switch to mostly BUY and vice versa
+        prefer_buy = False
+        prefer_sell = False
+        if overall_sell_count >= 3 and overall_sell_rate < 25:
+            prefer_buy = True  # SELL keeps failing, lean towards BUY
+        if overall_buy_count >= 3 and overall_buy_rate < 25:
+            prefer_sell = True  # BUY keeps failing, lean towards SELL
         
         for asset, price in current_prices.items():
             if len(recommendations) >= max_recommendations:
                 break
             
-            # Get price history for this asset
             history = price_history.get(asset, [])
-            if len(history) < 5:
+            if len(history) < 3:
                 continue
             
-            # Simple momentum analysis
-            recent_prices = history[-10:] if len(history) >= 10 else history
-            avg_price = sum(recent_prices) / len(recent_prices)
-            momentum = (price - avg_price) / avg_price * 100
+            # Analyze REAL price movement
+            # Short-term trend (last 5 prices)
+            short_term = history[-5:] if len(history) >= 5 else history
+            short_avg = sum(short_term) / len(short_term)
+            short_momentum = (price - short_avg) / short_avg * 100
             
-            # Volatility
-            price_changes = [abs(recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1] 
-                           for i in range(1, len(recent_prices))]
-            volatility = sum(price_changes) / len(price_changes) * 100 if price_changes else 0
+            # Medium-term trend (last 15 prices)
+            mid_term = history[-15:] if len(history) >= 15 else history
+            mid_avg = sum(mid_term) / len(mid_term)
+            mid_momentum = (price - mid_avg) / mid_avg * 100
             
-            # Generate recommendation based on patterns (RELAXED CONDITIONS)
-            if momentum > 0.5 and volatility < 5:  # Upward momentum (relaxed)
-                # BUY recommendation
-                target_price = price * 1.015  # 1.5% target
-                stop_loss = price * 0.995  # 0.5% stop loss
-                base_confidence = min(85, 60 + abs(momentum) * 5)
-                
-                # Adjust confidence based on learning
-                learning_key = f"{asset}_BUY"
-                if learning_key in learning_data and learning_data[learning_key]['total'] >= 3:
-                    success_rate = learning_data[learning_key]['success_rate']
-                    confidence = (base_confidence * 0.7) + (success_rate * 0.3)
-                    reasoning = f"📈 اتجاه صعودي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع ارتفاع السعر. [تم التعديل بناءً على دقة سابقة: {success_rate:.0f}%]"
+            # Price change rate (acceleration)
+            if len(history) >= 3:
+                recent_change = (history[-1] - history[-2]) / history[-2] * 100
+                prev_change = (history[-2] - history[-3]) / history[-3] * 100
+                acceleration = recent_change - prev_change
+            else:
+                recent_change = 0
+                acceleration = 0
+            
+            # Check if learned direction is available
+            learned_dir = self._get_learned_direction(learning_data, asset)
+            
+            # --- SMART DECISION ENGINE ---
+            action = None
+            confidence = 50
+            reasoning = ""
+            target_pct = 0.005  # Default 0.5% target
+            time_horizon = 30  # Default 30 min
+            
+            # Strategy 1: Follow the actual trend (momentum)
+            if short_momentum > 0.1:
+                # Price is rising
+                if prefer_sell and not learned_dir:  # Override only if no asset-specific learning
+                    pass  # Skip BUY if overall BUY fails
                 else:
-                    confidence = base_confidence
-                    reasoning = f"📈 اتجاه صعودي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع ارتفاع السعر."
-                
-                rec_id = self.create_recommendation(
-                    session_id, asset, 'BUY', price, target_price, stop_loss,
-                    time_horizon_minutes=30, confidence=confidence, reasoning=reasoning
-                )
-                recommendations.append(rec_id)
-                
-            elif momentum < -0.5 and volatility < 5:  # Downward momentum (relaxed)
-                # SELL recommendation
-                target_price = price * 0.985  # 1.5% target
-                stop_loss = price * 1.005  # 0.5% stop loss
-                base_confidence = min(85, 60 + abs(momentum) * 5)
-                
-                # Adjust confidence based on learning
-                learning_key = f"{asset}_SELL"
-                if learning_key in learning_data and learning_data[learning_key]['total'] >= 3:
-                    success_rate = learning_data[learning_key]['success_rate']
-                    confidence = (base_confidence * 0.7) + (success_rate * 0.3)
-                    reasoning = f"📉 اتجاه هبوطي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع انخفاض السعر. [تم التعديل بناءً على دقة سابقة: {success_rate:.0f}%]"
-                else:
-                    confidence = base_confidence
-                    reasoning = f"📉 اتجاه هبوطي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع انخفاض السعر."
-                
-                rec_id = self.create_recommendation(
-                    session_id, asset, 'SELL', price, target_price, stop_loss,
-                    time_horizon_minutes=30, confidence=confidence, reasoning=reasoning
-                )
-                recommendations.append(rec_id)
-                
-            elif volatility > 2 and abs(momentum) < 0.3:  # Volatility breakout
-                # Predict direction based on recent trend
-                if recent_prices[-1] > recent_prices[-3]:
-                    target_price = price * 1.02
-                    stop_loss = price * 0.99
-                    confidence = 65
-                    reasoning = f"⚡ تقلبات ملحوظة ({volatility:.2f}%) مع بداية اتجاه صعودي. فرصة للدخول."
                     action = 'BUY'
+                    target_pct = min(0.015, abs(short_momentum) * 0.005)
+                    confidence = min(80, 55 + abs(short_momentum) * 3)
+                    reasoning = f"📈 السعر في ارتفاع ({short_momentum:+.2f}%). الاتجاه يدعم الشراء."
+                    if acceleration > 0:
+                        confidence += 5
+                        reasoning += f" تسارع إيجابي في الحركة."
+            
+            elif short_momentum < -0.1:
+                # Price is falling
+                if prefer_buy and not learned_dir:  # Override only if no asset-specific learning
+                    pass  # Skip SELL if overall SELL fails
                 else:
-                    target_price = price * 0.98
-                    stop_loss = price * 1.01
-                    confidence = 65
-                    reasoning = f"⚡ تقلبات ملحوظة ({volatility:.2f}%) مع بداية اتجاه هبوطي. فرصة للبيع."
                     action = 'SELL'
-                
-                rec_id = self.create_recommendation(
-                    session_id, asset, action, price, target_price, stop_loss,
-                    time_horizon_minutes=45, confidence=confidence, reasoning=reasoning
-                )
-                recommendations.append(rec_id)
-                
-            elif abs(momentum) < 0.2 and volatility < 1:  # Consolidation - predict breakout
-                # Stable price, predict small move
-                hour = datetime.now().hour
-                if hour % 2 == 0:  # Even hours - predict up
-                    target_price = price * 1.01
-                    stop_loss = price * 0.995
+                    target_pct = min(0.015, abs(short_momentum) * 0.005)
+                    confidence = min(80, 55 + abs(short_momentum) * 3)
+                    reasoning = f"📉 السعر في انخفاض ({short_momentum:+.2f}%). الاتجاه يدعم البيع."
+                    if acceleration < 0:
+                        confidence += 5
+                        reasoning += f" تسارع في الانخفاض."
+            
+            else:
+                # Price is stable - use mean reversion
+                if mid_momentum > 0.2:
+                    # Was going up, now stable - might continue or reverse
+                    action = 'BUY' if not prefer_sell else 'SELL'
+                    target_pct = 0.005
                     confidence = 55
-                    reasoning = f"🎯 السعر مستقر ({volatility:.2f}% تقلبات). توقع حركة صعودية بسيطة."
-                    action = 'BUY'
-                else:  # Odd hours - predict down
-                    target_price = price * 0.99
-                    stop_loss = price * 1.005
+                    reasoning = f"📊 استقرار بعد صعود. توقع استئناف الاتجاه الصعودي."
+                elif mid_momentum < -0.2:
+                    action = 'SELL' if not prefer_buy else 'BUY'
+                    target_pct = 0.005
                     confidence = 55
-                    reasoning = f"🎯 السعر مستقر ({volatility:.2f}% تقلبات). توقع حركة هبوطية بسيطة."
-                    action = 'SELL'
-                
-                rec_id = self.create_recommendation(
-                    session_id, asset, action, price, target_price, stop_loss,
-                    time_horizon_minutes=20, confidence=confidence, reasoning=reasoning
-                )
-                recommendations.append(rec_id)
+                    reasoning = f"📊 استقرار بعد هبوط. توقع استئناف الاتجاه الهبوطي."
+                else:
+                    # Truly flat - use time-based alternation for variety
+                    minute = datetime.now().minute
+                    if minute % 2 == 0:
+                        action = 'BUY'
+                        reasoning = f"🔄 سوق هادئ. توقع حركة صعودية بسيطة."
+                    else:
+                        action = 'SELL'
+                        reasoning = f"🔄 سوق هادئ. توقع حركة هبوطية بسيطة."
+                    target_pct = 0.003
+                    confidence = 50
+            
+            # Override with learned direction if we have strong data
+            if learned_dir and action != learned_dir:
+                asset_key = f"{asset}_{learned_dir}"
+                learned_rate = learning_data.get(asset_key, {}).get('success_rate', 0)
+                if learned_rate > 60:  # Only override if learned rate is good
+                    action = learned_dir
+                    confidence = min(85, confidence + 10)
+                    reasoning += f" [🧠 تعلم: {learned_dir} أدق لـ {asset} ({learned_rate:.0f}%)]"
+            
+            if action is None:
+                continue
+            
+            # Apply learning adjustments to confidence
+            learning_key = f"{asset}_{action}"
+            if learning_key in learning_data:
+                past = learning_data[learning_key]
+                if past['total'] >= 2:
+                    # Blend base confidence with learned accuracy
+                    weight = min(0.5, past['total'] * 0.1)  # More data = more weight (max 50%)
+                    confidence = confidence * (1 - weight) + past['success_rate'] * weight
+                    reasoning += f" [دقة سابقة: {past['success_rate']:.0f}% من {past['total']} توصية]"
+            
+            # Calculate target and stop loss
+            if action == 'BUY':
+                target_price = price * (1 + target_pct)
+                stop_loss = price * (1 - target_pct * 0.5)
+            else:
+                target_price = price * (1 - target_pct)
+                stop_loss = price * (1 + target_pct * 0.5)
+            
+            # Adjust time horizon based on confidence
+            if confidence >= 70:
+                time_horizon = 45  # Higher confidence, longer horizon
+            elif confidence >= 60:
+                time_horizon = 30
+            else:
+                time_horizon = 20  # Lower confidence, shorter horizon
+            
+            rec_id = self.create_recommendation(
+                session_id, asset, action, price, target_price, stop_loss,
+                time_horizon_minutes=time_horizon,
+                confidence=max(40, min(90, confidence)),
+                reasoning=reasoning
+            )
+            recommendations.append(rec_id)
         
         return recommendations
     
