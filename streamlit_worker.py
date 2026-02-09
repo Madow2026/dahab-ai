@@ -194,7 +194,7 @@ class StreamlitWorker:
                     'fetched_at': item['fetched_at'],
                     'source_reliability': item['source_reliability'],
                     'category': impact_analysis['category'],
-                    'affected_assets': ','.join(impact_analysis['affected_assets']),
+                    'affected_assets': impact_analysis.get('affected_assets', []),
                     'sentiment': impact_analysis['sentiment'],
                     'impact_level': impact_analysis['impact_level'],
                     'impact_analysis': str(impact_analysis)
@@ -237,22 +237,80 @@ class StreamlitWorker:
         try:
             # Get recent unprocessed news
             recent_news = self.db.get_unprocessed_news(limit=10)
-            
+
+            if not recent_news:
+                return
+
+            # Best-effort current prices (cached or last known from DB)
+            current_prices = {}
+            try:
+                for asset_name in config.ASSETS.keys():
+                    price_data = None
+                    try:
+                        price_data = self.market_data.get_cached_price(asset_name)
+                    except Exception:
+                        price_data = None
+
+                    if not price_data:
+                        try:
+                            last_known = self.db.get_latest_price(asset_name)
+                            if last_known and last_known.get('price') is not None:
+                                price_data = {
+                                    'price': float(last_known.get('price')),
+                                    'timestamp': last_known.get('timestamp'),
+                                    'stale': True,
+                                }
+                        except Exception:
+                            price_data = None
+
+                    if price_data:
+                        current_prices[asset_name] = price_data
+            except Exception:
+                current_prices = {}
+
             for news_item in recent_news:
+                inserted = 0
                 try:
-                    # Generate forecast
-                    forecast = self.forecaster.generate_forecast(news_item)
-                    
-                    if forecast:
-                        self.db.insert_forecast(forecast)
-                        print(f"🎯 Generated forecast: {forecast['asset']} {forecast['direction']}")
-                        
-                        # Mark news as processed
-                        self.db.mark_news_processed(news_item['id'])
-                            
+                    # Build analysis from stored fields
+                    affected_assets = news_item.get('affected_assets') or []
+                    if isinstance(affected_assets, str):
+                        affected_assets = [a.strip() for a in affected_assets.split(',') if a.strip()]
+                    elif not isinstance(affected_assets, list):
+                        affected_assets = []
+
+                    analysis = {
+                        'category': (news_item.get('category') or 'general'),
+                        'sentiment': (news_item.get('sentiment') or 'neutral'),
+                        'impact_level': (news_item.get('impact_level') or 'LOW'),
+                        'confidence': float(news_item.get('confidence') or 50.0),
+                        'affected_assets': affected_assets,
+                    }
+
+                    forecasts = self.forecaster.generate_forecasts(news_item, analysis, current_prices)
+                    for forecast in forecasts or []:
+                        try:
+                            self.db.insert_forecast(forecast)
+                            inserted += 1
+                        except Exception as e:
+                            print(f"Error inserting forecast: {e}")
+                            continue
+
+                    if inserted:
+                        try:
+                            a = forecasts[0].get('asset') if forecasts else ''
+                            d = forecasts[0].get('direction') if forecasts else ''
+                            print(f"🎯 Generated {inserted} forecasts (e.g., {a} {d})")
+                        except Exception:
+                            print(f"🎯 Generated {inserted} forecasts")
+
                 except Exception as e:
-                    print(f"Error generating forecast: {e}")
-                    continue
+                    print(f"Error generating forecasts: {e}")
+                finally:
+                    # Mark news processed to prevent infinite reprocessing loops
+                    try:
+                        self.db.mark_news_processed(news_item['id'])
+                    except Exception:
+                        pass
                     
         except Exception as e:
             print(f"Forecast generation error: {e}")
