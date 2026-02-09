@@ -79,8 +79,33 @@ class TrainingDatabase:
             )
         """)
         
+        # AI Recommendations (for educational training)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS training_recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                action TEXT NOT NULL,
+                current_price REAL NOT NULL,
+                target_price REAL,
+                stop_loss REAL,
+                time_horizon_minutes INTEGER,
+                confidence REAL NOT NULL,
+                reasoning TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                expires_at TEXT,
+                evaluated_at TEXT,
+                actual_price REAL,
+                was_accurate INTEGER,
+                accuracy_score REAL,
+                FOREIGN KEY (session_id) REFERENCES training_sessions (id)
+            )
+        """)
+        
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_session ON training_trades(session_id, timestamp DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_session ON training_positions(session_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_active ON training_recommendations(session_id, status, expires_at)")
         
         conn.commit()
         conn.close()
@@ -498,6 +523,236 @@ class TrainingDatabase:
             'total_commission': session['total_commission_paid'],
             'num_positions': len(positions)
         }
+    
+    # ========================================================================
+    # AI RECOMMENDATIONS FOR TRAINING
+    # ========================================================================
+    
+    def create_recommendation(self, session_id: int, asset: str, action: str,
+                            current_price: float, target_price: float,
+                            stop_loss: float, time_horizon_minutes: int,
+                            confidence: float, reasoning: str) -> int:
+        """Create new AI recommendation"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        created_at = datetime.now()
+        expires_at = created_at + timedelta(minutes=time_horizon_minutes)
+        
+        cursor.execute("""
+            INSERT INTO training_recommendations
+            (session_id, created_at, asset, action, current_price, target_price,
+             stop_loss, time_horizon_minutes, confidence, reasoning, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            session_id, created_at.isoformat(), asset, action, current_price,
+            target_price, stop_loss, time_horizon_minutes, confidence, reasoning,
+            expires_at.isoformat()
+        ))
+        
+        rec_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return rec_id
+    
+    def get_active_recommendations(self, session_id: int) -> List[Dict]:
+        """Get active recommendations for session"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM training_recommendations
+            WHERE session_id = ? AND status = 'active'
+            AND datetime(expires_at) > datetime('now')
+            ORDER BY created_at DESC
+        """, (session_id,))
+        
+        recommendations = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return recommendations
+    
+    def evaluate_recommendation(self, rec_id: int, actual_price: float) -> Dict:
+        """Evaluate recommendation accuracy after time horizon"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Get recommendation
+        cursor.execute("SELECT * FROM training_recommendations WHERE id = ?", (rec_id,))
+        rec = dict(cursor.fetchone())
+        
+        # Calculate accuracy
+        target_price = rec['target_price']
+        current_price = rec['current_price']
+        action = rec['action']
+        
+        # Determine if prediction was accurate
+        if action == 'BUY':
+            # Expected price to go up
+            expected_move = target_price - current_price
+            actual_move = actual_price - current_price
+            was_accurate = actual_move > 0 and actual_move >= expected_move * 0.5
+            accuracy_score = min(100, (actual_move / expected_move * 100)) if expected_move > 0 else 0
+        else:  # SELL
+            # Expected price to go down
+            expected_move = current_price - target_price
+            actual_move = current_price - actual_price
+            was_accurate = actual_move > 0 and actual_move >= expected_move * 0.5
+            accuracy_score = min(100, (actual_move / expected_move * 100)) if expected_move > 0 else 0
+        
+        # Update recommendation
+        cursor.execute("""
+            UPDATE training_recommendations
+            SET status = 'evaluated',
+                evaluated_at = ?,
+                actual_price = ?,
+                was_accurate = ?,
+                accuracy_score = ?
+            WHERE id = ?
+        """, (
+            datetime.now().isoformat(),
+            actual_price,
+            1 if was_accurate else 0,
+            max(0, accuracy_score),
+            rec_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'was_accurate': was_accurate,
+            'accuracy_score': accuracy_score,
+            'expected_move': expected_move if action == 'BUY' else -expected_move,
+            'actual_move': actual_move if action == 'BUY' else -actual_move
+        }
+    
+    def get_recommendation_stats(self, session_id: int) -> Dict:
+        """Get recommendation accuracy statistics"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN was_accurate = 1 THEN 1 ELSE 0 END) as accurate,
+                AVG(accuracy_score) as avg_score,
+                AVG(confidence) as avg_confidence
+            FROM training_recommendations
+            WHERE session_id = ? AND status = 'evaluated'
+        """, (session_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row['total'] > 0:
+            return {
+                'total_evaluated': row['total'],
+                'accurate_count': row['accurate'] or 0,
+                'accuracy_rate': (row['accurate'] or 0) / row['total'] * 100,
+                'avg_accuracy_score': row['avg_score'] or 0,
+                'avg_confidence': row['avg_confidence'] or 0
+            }
+        return {
+            'total_evaluated': 0,
+            'accurate_count': 0,
+            'accuracy_rate': 0,
+            'avg_accuracy_score': 0,
+            'avg_confidence': 0
+        }
+    
+    def generate_ai_recommendations(self, session_id: int, current_prices: Dict[str, float],
+                                   price_history: Dict[str, List[float]], max_recommendations: int = 3) -> List[int]:
+        """
+        Generate AI recommendations based on price analysis
+        Educational algorithm - uses simple technical analysis
+        """
+        recommendations = []
+        
+        for asset, price in current_prices.items():
+            if len(self.get_active_recommendations(session_id)) >= max_recommendations:
+                break
+            
+            # Get price history for this asset
+            history = price_history.get(asset, [])
+            if len(history) < 5:
+                continue
+            
+            # Simple momentum analysis
+            recent_prices = history[-5:]
+            avg_price = sum(recent_prices) / len(recent_prices)
+            momentum = (price - avg_price) / avg_price * 100
+            
+            # Volatility
+            price_changes = [abs(recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1] 
+                           for i in range(1, len(recent_prices))]
+            volatility = sum(price_changes) / len(price_changes) * 100
+            
+            # Generate recommendation based on patterns
+            if momentum > 2 and volatility < 3:  # Strong upward momentum, low volatility
+                # BUY recommendation
+                target_price = price * 1.02  # 2% target
+                stop_loss = price * 0.99  # 1% stop loss
+                confidence = min(85, 70 + abs(momentum) * 2)
+                reasoning = f"📈 اتجاه صعودي قوي (+{momentum:.1f}%) مع تقلبات منخفضة. من المتوقع استمرار الزيادة."
+                
+                rec_id = self.create_recommendation(
+                    session_id, asset, 'BUY', price, target_price, stop_loss,
+                    time_horizon_minutes=60, confidence=confidence, reasoning=reasoning
+                )
+                recommendations.append(rec_id)
+                
+            elif momentum < -2 and volatility < 3:  # Strong downward momentum
+                # SELL recommendation
+                target_price = price * 0.98  # 2% target
+                stop_loss = price * 1.01  # 1% stop loss
+                confidence = min(85, 70 + abs(momentum) * 2)
+                reasoning = f"📉 اتجاه هبوطي قوي ({momentum:.1f}%) مع تقلبات منخفضة. من المتوقع استمرار الانخفاض."
+                
+                rec_id = self.create_recommendation(
+                    session_id, asset, 'SELL', price, target_price, stop_loss,
+                    time_horizon_minutes=60, confidence=confidence, reasoning=reasoning
+                )
+                recommendations.append(rec_id)
+                
+            elif volatility > 5:  # High volatility
+                # Potential reversal
+                if momentum < 0:
+                    target_price = price * 1.025
+                    stop_loss = price * 0.985
+                    confidence = 65
+                    reasoning = f"🔄 تقلبات عالية ({volatility:.1f}%) بعد هبوط. احتمالية انعكاس صعودي خلال الساعة القادمة."
+                    
+                    rec_id = self.create_recommendation(
+                        session_id, asset, 'BUY', price, target_price, stop_loss,
+                        time_horizon_minutes=45, confidence=confidence, reasoning=reasoning
+                    )
+                    recommendations.append(rec_id)
+        
+        return recommendations
+    
+    def auto_evaluate_expired_recommendations(self, session_id: int, current_prices: Dict[str, float]) -> int:
+        """Automatically evaluate expired recommendations"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT id, asset FROM training_recommendations
+            WHERE session_id = ? AND status = 'active'
+            AND datetime(expires_at) <= datetime('now')
+        """, (session_id,))
+        
+        expired = cursor.fetchall()
+        conn.close()
+        
+        evaluated_count = 0
+        for row in expired:
+            rec_id = row['id']
+            asset = row['asset']
+            if asset in current_prices:
+                self.evaluate_recommendation(rec_id, current_prices[asset])
+                evaluated_count += 1
+        
+        return evaluated_count
 
 
 # Singleton

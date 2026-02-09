@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from typing import List, Dict
 import sys
 import os
 
@@ -603,6 +604,277 @@ def render_trade_history(session_id: int):
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
+def get_price_history(asset: str, hours: int = 2) -> List[float]:
+    """Get recent price history for an asset from main database"""
+    main_db = get_db()
+    conn = main_db.get_connection()
+    cursor = conn.cursor()
+    
+    # Get historical prices
+    since = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cursor.execute("""
+        SELECT price, timestamp FROM market_data
+        WHERE asset = ? AND timestamp > ?
+        ORDER BY timestamp ASC
+    """, (asset, since))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if rows:
+        return [row['price'] for row in rows]
+    else:
+        # Fallback: simulate price history
+        current = get_current_prices().get(asset, 100)
+        history = []
+        for i in range(20):
+            noise = (hash(f"{asset}{i}") % 100 - 50) / 1000
+            history.append(current * (1 + noise))
+        return history
+
+
+def render_live_price_charts(current_prices: Dict[str, float]):
+    """Render live updating price charts for all assets"""
+    st.markdown("### 📊 Live Price Charts")
+    
+    # Create tabs for each asset
+    assets = list(current_prices.keys())
+    tabs = st.tabs([f"📈 {asset}" for asset in assets])
+    
+    for i, asset in enumerate(assets):
+        with tabs[i]:
+            # Get price history
+            price_history = get_price_history(asset, hours=2)
+            
+            # Create chart
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(
+                y=price_history,
+                mode='lines',
+                name=asset,
+                line=dict(color='#00d4aa', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(0, 212, 170, 0.1)'
+            ))
+            
+            # Add current price marker
+            fig.add_trace(go.Scatter(
+                x=[len(price_history) - 1],
+                y=[current_prices[asset]],
+                mode='markers+text',
+                name='Current',
+                marker=dict(size=12, color='#ffd700', symbol='diamond'),
+                text=[f"${current_prices[asset]:,.2f}"],
+                textposition="top center",
+                textfont=dict(size=14, color='#ffd700')
+            ))
+            
+            # Calculate price change
+            if len(price_history) > 1:
+                change = current_prices[asset] - price_history[0]
+                change_pct = (change / price_history[0]) * 100
+                change_color = '#00d4aa' if change > 0 else '#e74c3c'
+                change_symbol = '▲' if change > 0 else '▼'
+            else:
+                change_pct = 0
+                change_color = '#666'
+                change_symbol = '●'
+            
+            fig.update_layout(
+                title=f"{asset} - ${current_prices[asset]:,.2f} {change_symbol} {change_pct:+.2f}%",
+                xaxis_title="Time",
+                yaxis_title="Price (USD)",
+                template='plotly_dark',
+                height=300,
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                title_font=dict(color=change_color, size=16)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+
+
+def render_ai_recommendations(session_id: int, current_prices: Dict[str, float]):
+    """Render AI recommendations section with confidence and accuracy tracking"""
+    training_db = get_training_db()
+    
+    st.markdown("### 🤖 AI Trading Recommendations")
+    
+    # Auto-evaluate expired recommendations
+    evaluated_count = training_db.auto_evaluate_expired_recommendations(session_id, current_prices)
+    
+    # Get active recommendations
+    active_recs = training_db.get_active_recommendations(session_id)
+    
+    # Get recommendation stats
+    stats = training_db.get_recommendation_stats(session_id)
+    
+    # Display stats if any recommendations were evaluated
+    if stats['total_evaluated'] > 0:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "📊 Total Evaluated",
+                stats['total_evaluated']
+            )
+        
+        with col2:
+            st.metric(
+                "✅ Accuracy Rate",
+                f"{stats['accuracy_rate']:.1f}%",
+                delta=f"{stats['accurate_count']} correct"
+            )
+        
+        with col3:
+            st.metric(
+                "🎯 Avg Score",
+                f"{stats['avg_accuracy_score']:.1f}",
+                help="Average accuracy score (0-100)"
+            )
+        
+        with col4:
+            st.metric(
+                "💪 Avg Confidence",
+                f"{stats['avg_confidence']:.1f}%",
+                help="Average AI confidence in recommendations"
+            )
+        
+        st.markdown("---")
+    
+    # Button to generate new recommendations
+    col_gen, col_refresh = st.columns([1, 1])
+    
+    with col_gen:
+        if st.button("🎲 Generate AI Recommendations", type="primary", use_container_width=True):
+            # Get price history for analysis
+            price_history = {}
+            for asset in current_prices.keys():
+                price_history[asset] = get_price_history(asset, hours=1)
+            
+            # Generate recommendations
+            new_recs = training_db.generate_ai_recommendations(
+                session_id, current_prices, price_history, max_recommendations=3
+            )
+            
+            if new_recs:
+                st.success(f"✨ Generated {len(new_recs)} new recommendations!")
+                st.rerun()
+            else:
+                st.info("No new recommendations at this time. Market conditions not suitable.")
+    
+    with col_refresh:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Display active recommendations
+    if not active_recs:
+        st.info("📭 No active recommendations. Click 'Generate AI Recommendations' to get trading suggestions.")
+    else:
+        st.markdown(f"**🔔 {len(active_recs)} Active Recommendations:**")
+        
+        for rec in active_recs:
+            # Calculate time remaining
+            expires_at = datetime.fromisoformat(rec['expires_at'])
+            time_remaining = expires_at - datetime.now()
+            minutes_remaining = max(0, time_remaining.total_seconds() / 60)
+            
+            # Current price change
+            current_price = current_prices.get(rec['asset'], rec['current_price'])
+            price_change = current_price - rec['current_price']
+            price_change_pct = (price_change / rec['current_price']) * 100
+            
+            # Determine if currently profitable
+            if rec['action'] == 'BUY':
+                is_winning = price_change > 0
+                target_reached = current_price >= rec['target_price']
+                stop_hit = current_price <= rec['stop_loss']
+            else:  # SELL
+                is_winning = price_change < 0
+                target_reached = current_price <= rec['target_price']
+                stop_hit = current_price >= rec['stop_loss']
+            
+            # Color coding
+            if target_reached:
+                border_color = '#00d4aa'
+                status_emoji = '🎯'
+                status_text = 'Target Reached!'
+            elif stop_hit:
+                border_color = '#e74c3c'
+                status_emoji = '🛑'
+                status_text = 'Stop Loss Hit'
+            elif is_winning:
+                border_color = '#4a90e2'
+                status_emoji = '📈'
+                status_text = 'Profitable'
+            else:
+                border_color = '#f39c12'
+                status_emoji = '⏳'
+                status_text = 'Pending'
+            
+            # Render recommendation card
+            st.markdown(f"""
+            <div style='
+                background: linear-gradient(135deg, #1a1d24 0%, #252932 100%);
+                border-left: 4px solid {border_color};
+                border-radius: 10px;
+                padding: 20px;
+                margin-bottom: 15px;
+            '>
+            """, unsafe_allow_html=True)
+            
+            col_info, col_metrics = st.columns([2, 1])
+            
+            with col_info:
+                action_color = '#00d4aa' if rec['action'] == 'BUY' else '#e74c3c'
+                action_emoji = '🟢' if rec['action'] == 'BUY' else '🔴'
+                
+                st.markdown(f"""
+                **{action_emoji} {rec['action']} {rec['asset']}**
+                
+                {rec['reasoning']}
+                
+                **Entry Price:** ${rec['current_price']:,.2f}  
+                **Target Price:** ${rec['target_price']:,.2f} ({((rec['target_price']/rec['current_price']-1)*100):+.2f}%)  
+                **Stop Loss:** ${rec['stop_loss']:,.2f} ({((rec['stop_loss']/rec['current_price']-1)*100):+.2f}%)  
+                
+                **Current Price:** ${current_price:,.2f} ({price_change_pct:+.2f}%)
+                """)
+            
+            with col_metrics:
+                # Confidence gauge
+                st.markdown("**🎯 Confidence**")
+                confidence_color = '#00d4aa' if rec['confidence'] >= 75 else '#f39c12' if rec['confidence'] >= 60 else '#e74c3c'
+                st.markdown(f"""
+                <div style='text-align: center;'>
+                    <div style='font-size: 2.5rem; color: {confidence_color}; font-weight: bold;'>
+                        {rec['confidence']:.0f}%
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Status
+                st.markdown(f"**{status_emoji} {status_text}**")
+                
+                # Time remaining
+                st.caption(f"⏱️ {minutes_remaining:.0f} min remaining")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Educational note
+    st.markdown("""
+    <div class='tip-box'>
+        <strong>📚 Learning Note:</strong> These recommendations are generated by analyzing price momentum, 
+        volatility, and historical patterns. Compare the AI's predictions with actual outcomes to understand 
+        which signals are reliable. Track the accuracy rate above to see how well the AI performs!
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def render_educational_tips():
     """Display educational tips and insights"""
     st.markdown("### 🎓 Trading Lessons")
@@ -700,6 +972,16 @@ def main():
     
     # Settings panel
     render_settings_panel(session_id)
+    
+    st.markdown("---")
+    
+    # AI Recommendations Section (NEW!)
+    render_ai_recommendations(session_id, current_prices)
+    
+    st.markdown("---")
+    
+    # Live Price Charts (NEW!)
+    render_live_price_charts(current_prices)
     
     st.markdown("---")
     
