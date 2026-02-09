@@ -571,6 +571,22 @@ class TrainingDatabase:
         conn.close()
         return recommendations
     
+    def get_evaluated_recommendations(self, session_id: int, limit: int = 10) -> List[Dict]:
+        """Get recently evaluated recommendations with results"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM training_recommendations
+            WHERE session_id = ? AND status = 'evaluated'
+            ORDER BY evaluated_at DESC
+            LIMIT ?
+        """, (session_id, limit))
+        
+        recommendations = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return recommendations
+    
     def evaluate_recommendation(self, rec_id: int, actual_price: float) -> Dict:
         """Evaluate recommendation accuracy after time horizon"""
         conn = self.get_connection()
@@ -660,13 +676,50 @@ class TrainingDatabase:
             'avg_confidence': 0
         }
     
+    def learn_from_results(self, session_id: int) -> Dict:
+        """Analyze past recommendations to improve future predictions"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Get statistics by asset and action
+        cursor.execute("""
+            SELECT 
+                asset,
+                action,
+                COUNT(*) as total,
+                AVG(CASE WHEN was_accurate = 1 THEN 1.0 ELSE 0.0 END) as success_rate,
+                AVG(accuracy_score) as avg_score,
+                AVG(confidence) as avg_confidence
+            FROM training_recommendations
+            WHERE session_id = ? AND status = 'evaluated'
+            GROUP BY asset, action
+        """, (session_id,))
+        
+        learning_data = {}
+        for row in cursor.fetchall():
+            key = f"{row['asset']}_{row['action']}"
+            learning_data[key] = {
+                'asset': row['asset'],
+                'action': row['action'],
+                'total': row['total'],
+                'success_rate': row['success_rate'] * 100,
+                'avg_score': row['avg_score'] or 0,
+                'avg_confidence': row['avg_confidence'] or 0
+            }
+        
+        conn.close()
+        return learning_data
+    
     def generate_ai_recommendations(self, session_id: int, current_prices: Dict[str, float],
                                    price_history: Dict[str, List[float]], max_recommendations: int = 3) -> List[int]:
         """
         Generate AI recommendations based on price analysis
-        Educational algorithm - uses simple technical analysis
+        Educational algorithm - uses simple technical analysis with learning
         """
         recommendations = []
+        
+        # Learn from past results to adjust confidence
+        learning_data = self.learn_from_results(session_id)
         
         for asset, price in current_prices.items():
             if len(recommendations) >= max_recommendations:
@@ -692,8 +745,17 @@ class TrainingDatabase:
                 # BUY recommendation
                 target_price = price * 1.015  # 1.5% target
                 stop_loss = price * 0.995  # 0.5% stop loss
-                confidence = min(85, 60 + abs(momentum) * 5)
-                reasoning = f"📈 اتجاه صعودي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع ارتفاع السعر."
+                base_confidence = min(85, 60 + abs(momentum) * 5)
+                
+                # Adjust confidence based on learning
+                learning_key = f"{asset}_BUY"
+                if learning_key in learning_data and learning_data[learning_key]['total'] >= 3:
+                    success_rate = learning_data[learning_key]['success_rate']
+                    confidence = (base_confidence * 0.7) + (success_rate * 0.3)
+                    reasoning = f"📈 اتجاه صعودي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع ارتفاع السعر. [تم التعديل بناءً على دقة سابقة: {success_rate:.0f}%]"
+                else:
+                    confidence = base_confidence
+                    reasoning = f"📈 اتجاه صعودي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع ارتفاع السعر."
                 
                 rec_id = self.create_recommendation(
                     session_id, asset, 'BUY', price, target_price, stop_loss,
@@ -705,8 +767,17 @@ class TrainingDatabase:
                 # SELL recommendation
                 target_price = price * 0.985  # 1.5% target
                 stop_loss = price * 1.005  # 0.5% stop loss
-                confidence = min(85, 60 + abs(momentum) * 5)
-                reasoning = f"📉 اتجاه هبوطي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع انخفاض السعر."
+                base_confidence = min(85, 60 + abs(momentum) * 5)
+                
+                # Adjust confidence based on learning
+                learning_key = f"{asset}_SELL"
+                if learning_key in learning_data and learning_data[learning_key]['total'] >= 3:
+                    success_rate = learning_data[learning_key]['success_rate']
+                    confidence = (base_confidence * 0.7) + (success_rate * 0.3)
+                    reasoning = f"📉 اتجاه هبوطي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع انخفاض السعر. [تم التعديل بناءً على دقة سابقة: {success_rate:.0f}%]"
+                else:
+                    confidence = base_confidence
+                    reasoning = f"📉 اتجاه هبوطي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع انخفاض السعر."
                 
                 rec_id = self.create_recommendation(
                     session_id, asset, 'SELL', price, target_price, stop_loss,

@@ -879,6 +879,107 @@ def render_ai_recommendations(session_id: int, current_prices: Dict[str, float])
         which signals are reliable. Track the accuracy rate above to see how well the AI performs!
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show evaluated recommendations
+    st.markdown("---")
+    render_evaluated_recommendations(session_id, current_prices)
+
+
+def render_evaluated_recommendations(session_id: int, current_prices: Dict[str, float]):
+    """Display recently evaluated recommendations with accuracy results"""
+    training_db = get_training_db()
+    
+    # Get evaluated recommendations
+    evaluated_recs = training_db.get_evaluated_recommendations(session_id, limit=10)
+    
+    if not evaluated_recs:
+        return
+    
+    st.markdown("### 📊 Recently Evaluated Recommendations")
+    st.caption("Learn from past predictions - see what worked and what didn't!")
+    
+    # Create expandable section
+    with st.expander(f"📜 View {len(evaluated_recs)} Evaluated Recommendations", expanded=False):
+        for rec in evaluated_recs:
+            # Calculate results
+            price_move = rec['actual_price'] - rec['current_price']
+            price_move_pct = (price_move / rec['current_price']) * 100
+            
+            # Determine success
+            was_accurate = rec['was_accurate'] == 1
+            accuracy_score = rec['accuracy_score'] or 0
+            
+            # Color coding
+            if was_accurate:
+                border_color = '#00d4aa'
+                result_emoji = '✅'
+                result_text = 'ACCURATE'
+            else:
+                border_color = '#e74c3c'
+                result_emoji = '❌'
+                result_text = 'MISSED'
+            
+            # Render card
+            st.markdown(f"""
+            <div style='
+                background: linear-gradient(135deg, #1a1d24 0%, #252932 100%);
+                border-left: 4px solid {border_color};
+                border-radius: 10px;
+                padding: 15px;
+                margin-bottom: 10px;
+            '>
+            """, unsafe_allow_html=True)
+            
+            col1, col2, col3 = st.columns([2, 1, 1])
+            
+            with col1:
+                action_emoji = '🟢' if rec['action'] == 'BUY' else '🔴'
+                st.markdown(f"""
+                **{action_emoji} {rec['action']} {rec['asset']}**
+                
+                {rec['reasoning']}
+                """)
+            
+            with col2:
+                st.markdown(f"""
+                **Entry:** ${rec['current_price']:,.2f}  
+                **Target:** ${rec['target_price']:,.2f}  
+                **Actual:** ${rec['actual_price']:,.2f}  
+                **Move:** {price_move_pct:+.2f}%
+                """)
+            
+            with col3:
+                st.markdown(f"""
+                <div style='text-align: center;'>
+                    <div style='font-size: 1.5rem;'>{result_emoji}</div>
+                    <div style='font-weight: bold; color: {border_color};'>{result_text}</div>
+                    <div style='font-size: 1.2rem; color: #ffd700;'>{accuracy_score:.0f}/100</div>
+                    <div style='font-size: 0.8rem; color: #999;'>Confidence: {rec['confidence']:.0f}%</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Learning insights
+        learning_data = training_db.learn_from_results(session_id)
+        
+        if learning_data:
+            st.markdown("---")
+            st.markdown("### 🧠 AI Learning Insights")
+            st.caption("The AI adjusts future recommendations based on these results")
+            
+            cols = st.columns(len(learning_data))
+            for idx, (key, data) in enumerate(learning_data.items()):
+                with cols[idx]:
+                    color = '#00d4aa' if data['success_rate'] >= 60 else '#f39c12' if data['success_rate'] >= 40 else '#e74c3c'
+                    st.markdown(f"""
+                    <div style='text-align: center; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 8px;'>
+                        <div style='font-size: 1.2rem; font-weight: bold;'>{data['asset']}</div>
+                        <div style='color: {'#00d4aa' if data['action'] == 'BUY' else '#e74c3c'};'>{data['action']}</div>
+                        <div style='font-size: 1.5rem; color: {color}; margin: 5px 0;'>{data['success_rate']:.0f}%</div>
+                        <div style='font-size: 0.8rem; color: #999;'>{data['total']} predictions</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
 
 def render_educational_tips():
@@ -886,6 +987,10 @@ def render_educational_tips():
     st.markdown("### 🎓 Trading Lessons")
     
     tips = [
+        {
+            'title': '🧠 AI Learning System',
+            'content': 'The AI learns from every recommendation! After each prediction is evaluated, the system adjusts future confidence levels based on success rates. If Gold BUY recommendations are 80% accurate, future Gold BUY suggestions will have higher confidence. This is real machine learning in action!'
+        },
         {
             'title': 'Commission Awareness',
             'content': 'Every trade costs money. Two round trips (buy→sell→buy→sell) means 4 commissions. Trade less, profit more!'
