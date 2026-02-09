@@ -610,27 +610,30 @@ def get_price_history(asset: str, hours: int = 2) -> List[float]:
     current_prices = get_current_prices()
     current = current_prices.get(asset, 100)
     
-    # Generate realistic simulated price history
+    # Generate realistic simulated price history with MORE variation
     # This is intentionally simulated since training simulator is educational
     history = []
     num_points = 30
     
-    # Create a trending pattern with some noise
+    # Create a trending pattern with MORE noise for better recommendations
     trend_direction = (hash(asset) % 3 - 1)  # -1, 0, or 1
-    trend_strength = 0.0005  # 0.05% per point
+    trend_strength = 0.002  # 0.2% per point (increased from 0.05%)
     
     for i in range(num_points):
         # Calculate price at this point (going backwards in time)
         reverse_i = num_points - i - 1
         
-        # Trend component
+        # Trend component (stronger)
         trend = current * (1 - trend_direction * trend_strength * reverse_i)
         
-        # Random noise (±0.5%)
+        # Random noise (±1.5% - increased from ±0.5%)
         noise_seed = hash(f"{asset}{i}{hours}") % 1000
-        noise = (noise_seed - 500) / 100000
+        noise = (noise_seed - 500) / 33333  # More volatility
         
-        price = trend * (1 + noise)
+        # Add some wave pattern for more interesting charts
+        wave = 0.003 * (i % 5 - 2)  # Small sine-like wave
+        
+        price = trend * (1 + noise + wave)
         history.append(price)
     
     return history

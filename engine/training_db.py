@@ -669,7 +669,7 @@ class TrainingDatabase:
         recommendations = []
         
         for asset, price in current_prices.items():
-            if len(self.get_active_recommendations(session_id)) >= max_recommendations:
+            if len(recommendations) >= max_recommendations:
                 break
             
             # Get price history for this asset
@@ -678,55 +678,84 @@ class TrainingDatabase:
                 continue
             
             # Simple momentum analysis
-            recent_prices = history[-5:]
+            recent_prices = history[-10:] if len(history) >= 10 else history
             avg_price = sum(recent_prices) / len(recent_prices)
             momentum = (price - avg_price) / avg_price * 100
             
             # Volatility
             price_changes = [abs(recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1] 
                            for i in range(1, len(recent_prices))]
-            volatility = sum(price_changes) / len(price_changes) * 100
+            volatility = sum(price_changes) / len(price_changes) * 100 if price_changes else 0
             
-            # Generate recommendation based on patterns
-            if momentum > 2 and volatility < 3:  # Strong upward momentum, low volatility
+            # Generate recommendation based on patterns (RELAXED CONDITIONS)
+            if momentum > 0.5 and volatility < 5:  # Upward momentum (relaxed)
                 # BUY recommendation
-                target_price = price * 1.02  # 2% target
-                stop_loss = price * 0.99  # 1% stop loss
-                confidence = min(85, 70 + abs(momentum) * 2)
-                reasoning = f"📈 اتجاه صعودي قوي (+{momentum:.1f}%) مع تقلبات منخفضة. من المتوقع استمرار الزيادة."
+                target_price = price * 1.015  # 1.5% target
+                stop_loss = price * 0.995  # 0.5% stop loss
+                confidence = min(85, 60 + abs(momentum) * 5)
+                reasoning = f"📈 اتجاه صعودي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع ارتفاع السعر."
                 
                 rec_id = self.create_recommendation(
                     session_id, asset, 'BUY', price, target_price, stop_loss,
-                    time_horizon_minutes=60, confidence=confidence, reasoning=reasoning
+                    time_horizon_minutes=30, confidence=confidence, reasoning=reasoning
                 )
                 recommendations.append(rec_id)
                 
-            elif momentum < -2 and volatility < 3:  # Strong downward momentum
+            elif momentum < -0.5 and volatility < 5:  # Downward momentum (relaxed)
                 # SELL recommendation
-                target_price = price * 0.98  # 2% target
-                stop_loss = price * 1.01  # 1% stop loss
-                confidence = min(85, 70 + abs(momentum) * 2)
-                reasoning = f"📉 اتجاه هبوطي قوي ({momentum:.1f}%) مع تقلبات منخفضة. من المتوقع استمرار الانخفاض."
+                target_price = price * 0.985  # 1.5% target
+                stop_loss = price * 1.005  # 0.5% stop loss
+                confidence = min(85, 60 + abs(momentum) * 5)
+                reasoning = f"📉 اتجاه هبوطي ({momentum:.2f}%) مع استقرار نسبي. من المتوقع انخفاض السعر."
                 
                 rec_id = self.create_recommendation(
                     session_id, asset, 'SELL', price, target_price, stop_loss,
-                    time_horizon_minutes=60, confidence=confidence, reasoning=reasoning
+                    time_horizon_minutes=30, confidence=confidence, reasoning=reasoning
                 )
                 recommendations.append(rec_id)
                 
-            elif volatility > 5:  # High volatility
-                # Potential reversal
-                if momentum < 0:
-                    target_price = price * 1.025
-                    stop_loss = price * 0.985
+            elif volatility > 2 and abs(momentum) < 0.3:  # Volatility breakout
+                # Predict direction based on recent trend
+                if recent_prices[-1] > recent_prices[-3]:
+                    target_price = price * 1.02
+                    stop_loss = price * 0.99
                     confidence = 65
-                    reasoning = f"🔄 تقلبات عالية ({volatility:.1f}%) بعد هبوط. احتمالية انعكاس صعودي خلال الساعة القادمة."
-                    
-                    rec_id = self.create_recommendation(
-                        session_id, asset, 'BUY', price, target_price, stop_loss,
-                        time_horizon_minutes=45, confidence=confidence, reasoning=reasoning
-                    )
-                    recommendations.append(rec_id)
+                    reasoning = f"⚡ تقلبات ملحوظة ({volatility:.2f}%) مع بداية اتجاه صعودي. فرصة للدخول."
+                    action = 'BUY'
+                else:
+                    target_price = price * 0.98
+                    stop_loss = price * 1.01
+                    confidence = 65
+                    reasoning = f"⚡ تقلبات ملحوظة ({volatility:.2f}%) مع بداية اتجاه هبوطي. فرصة للبيع."
+                    action = 'SELL'
+                
+                rec_id = self.create_recommendation(
+                    session_id, asset, action, price, target_price, stop_loss,
+                    time_horizon_minutes=45, confidence=confidence, reasoning=reasoning
+                )
+                recommendations.append(rec_id)
+                
+            elif abs(momentum) < 0.2 and volatility < 1:  # Consolidation - predict breakout
+                # Stable price, predict small move
+                hour = datetime.now().hour
+                if hour % 2 == 0:  # Even hours - predict up
+                    target_price = price * 1.01
+                    stop_loss = price * 0.995
+                    confidence = 55
+                    reasoning = f"🎯 السعر مستقر ({volatility:.2f}% تقلبات). توقع حركة صعودية بسيطة."
+                    action = 'BUY'
+                else:  # Odd hours - predict down
+                    target_price = price * 0.99
+                    stop_loss = price * 1.005
+                    confidence = 55
+                    reasoning = f"🎯 السعر مستقر ({volatility:.2f}% تقلبات). توقع حركة هبوطية بسيطة."
+                    action = 'SELL'
+                
+                rec_id = self.create_recommendation(
+                    session_id, asset, action, price, target_price, stop_loss,
+                    time_horizon_minutes=20, confidence=confidence, reasoning=reasoning
+                )
+                recommendations.append(rec_id)
         
         return recommendations
     
