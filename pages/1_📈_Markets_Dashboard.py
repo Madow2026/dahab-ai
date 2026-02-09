@@ -304,9 +304,9 @@ try:
             if impact_level in ['HIGH', 'CRITICAL']:
                 st.markdown(f"""
                 <div class="alert-box">
-                    <strong>{news_item.get('title_en')}</strong><br>
-                    <small>Source: {news_item.get('source')} | Impact: {news_item.get('impact_level')}</small><br>
-                    <small>Confidence: {news_item.get('confidence', 0):.0f}% | Category: {news_item.get('category', 'N/A')}</small>
+                    <strong>{news_item.get('title_en') or 'N/A'}</strong><br>
+                    <small>Source: {news_item.get('source') or 'N/A'} | Impact: {news_item.get('impact_level') or 'N/A'}</small><br>
+                    <small>Confidence: {(news_item.get('confidence') or 0):.0f}% | Category: {news_item.get('category') or 'N/A'}</small>
                 </div>
                 """, unsafe_allow_html=True)
     else:
