@@ -19,60 +19,73 @@ class AutoTrader:
         Evaluate if forecast should trigger a trade
         Returns trade dict or None if guardrails prevent trade
         """
-        # Check if trading is paused (daily loss limit)
-        portfolio = self.db.get_portfolio()
-        if portfolio and portfolio['is_trading_paused']:
-            return None
-        
-        # Guardrail 1: Confidence threshold
-        if forecast['confidence'] < config.MIN_CONFIDENCE_FOR_TRADE:
-            return None
-        
-        # Guardrail 2: Impact level (prefer MEDIUM/HIGH)
-        # (This check would need impact_level from forecast - we'll skip for now)
-        
-        # Guardrail 3: Max open trades per asset
-        open_trades = self.db.get_open_trades_for_asset(forecast['asset'])
-        if len(open_trades) >= config.MAX_OPEN_TRADES_PER_ASSET:
-            return None
-        
-        # Guardrail 4: Max trades per hour
-        if not self._check_hourly_limit():
-            return None
-        
-        # Guardrail 5: Direction must not be NEUTRAL
-        if forecast['direction'] == 'NEUTRAL':
-            return None
-        
-        # Guardrail 6: Must have valid current price
-        if not current_price or current_price <= 0:
-            return None
-        
-        # Calculate position size based on risk
-        position_size = self._calculate_position_size(portfolio)
-        
-        if position_size <= 0:
+        try:
+            # Check if trading is paused (daily loss limit)
+            portfolio = self.db.get_portfolio()
+            if not portfolio:
+                print("⚠️ Trader: No portfolio found")
+                return None
+            if portfolio.get('is_trading_paused'):
+                print("⚠️ Trader: Trading paused")
+                return None
+            
+            # Guardrail 1: Confidence threshold
+            confidence = forecast.get('confidence', 0)
+            if confidence < config.MIN_CONFIDENCE_FOR_TRADE:
+                return None
+            
+            # Guardrail 2: Direction must not be NEUTRAL
+            direction = forecast.get('direction', 'NEUTRAL')
+            if direction == 'NEUTRAL':
+                return None
+            
+            # Guardrail 3: Must have valid current price
+            if not current_price or current_price <= 0:
+                return None
+            
+            # Guardrail 4: Max open trades per asset
+            try:
+                open_trades = self.db.get_open_trades_for_asset(forecast['asset'])
+                if len(open_trades) >= config.MAX_OPEN_TRADES_PER_ASSET:
+                    return None
+            except Exception:
+                pass  # Don't block trading if check fails
+            
+            # Guardrail 5: Max trades per hour
+            try:
+                if not self._check_hourly_limit():
+                    return None
+            except Exception:
+                pass  # Don't block trading if check fails
+            
+            # Calculate position size based on risk
+            position_size = self._calculate_position_size(portfolio)
+            
+            if position_size <= 0:
+                return None
+        except Exception as e:
+            print(f"⚠️ Trader guardrail error: {e}")
             return None
         
         # Calculate stop loss and take profit
         sl_price, tp_price = self._calculate_sl_tp(
-            current_price, forecast['direction']
+            current_price, direction
         )
         
         # Create trade
         trade = {
-            'forecast_id': forecast['id'],
+            'forecast_id': forecast.get('id'),
             'news_id': forecast.get('news_id'),
             'asset': forecast['asset'],
-            'side': 'BUY' if forecast['direction'] == 'UP' else 'SELL',
+            'side': 'BUY' if direction == 'UP' else 'SELL',
             'size_usd': position_size,
             'entry_price': current_price,
             'entry_time': datetime.now().isoformat(),
             'stop_loss': sl_price,
             'take_profit': tp_price,
             'reason': f"Auto-trade: {forecast.get('reasoning', 'forecast-based')}",
-            'confidence': forecast['confidence'],
-            'risk_level': forecast['risk_level']
+            'confidence': confidence,
+            'risk_level': forecast.get('risk_level', 'MEDIUM')
         }
         
         return trade

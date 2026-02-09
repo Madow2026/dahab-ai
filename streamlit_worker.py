@@ -101,14 +101,14 @@ class StreamlitWorker:
                 # Update prices
                 self._safe_run('Prices', self._update_prices)
                 
-                # Evaluate forecasts
-                self._safe_run('Forecast Eval', self._evaluate_forecasts)
-                
-                # Generate forecasts
+                # Generate forecasts FIRST
                 self._safe_run('Forecasts', self._generate_forecasts)
                 
-                # Execute auto-trades from forecasts
+                # Execute auto-trades BEFORE evaluation (so forecasts are still 'active')
                 self._safe_run('Auto Trading', self._execute_auto_trades)
+                
+                # Evaluate forecasts AFTER trading has had a chance
+                self._safe_run('Forecast Eval', self._evaluate_forecasts)
                 
                 # Evaluate trades
                 self._safe_run('Trade Eval', self._evaluate_trades)
@@ -321,11 +321,29 @@ class StreamlitWorker:
     def _execute_auto_trades(self):
         """Execute auto-trades based on recent forecasts"""
         try:
+            # Reset daily trading pause if new day
+            try:
+                portfolio = self.db.get_portfolio()
+                if portfolio:
+                    from datetime import date
+                    reset_date = portfolio.get('daily_reset_date', '')
+                    if reset_date != date.today().isoformat():
+                        self.db.reset_daily_pnl()
+                        print('📅 Daily P&L reset - trading unpaused')
+                    elif portfolio.get('is_trading_paused'):
+                        print('⏸️ Trading paused (daily loss limit). Will reset tomorrow.')
+                        return
+            except Exception as e:
+                print(f'Portfolio check error: {e}')
+            
             # Get recent active forecasts (not yet traded)
             recent_forecasts = self.db.get_active_forecasts(limit=50)
             
             if not recent_forecasts:
+                print('📭 No active forecasts for auto-trading')
                 return
+            
+            print(f'📊 Found {len(recent_forecasts)} active forecasts for trading')
             
             # Get current prices
             current_prices = {}
@@ -351,29 +369,70 @@ class StreamlitWorker:
                             pass
             
             trades_executed = 0
+            skipped_reasons = {}
             
             for forecast in recent_forecasts:
                 try:
                     asset = forecast.get('asset')
-                    if not asset or asset not in current_prices:
+                    if not asset:
+                        skipped_reasons['no_asset'] = skipped_reasons.get('no_asset', 0) + 1
                         continue
+                    
+                    if asset not in current_prices:
+                        # Try DB fallback
+                        try:
+                            db_price = self.db.get_latest_price(asset)
+                            if db_price and db_price.get('price'):
+                                current_prices[asset] = float(db_price['price'])
+                            else:
+                                skipped_reasons['no_price'] = skipped_reasons.get('no_price', 0) + 1
+                                continue
+                        except Exception:
+                            skipped_reasons['no_price'] = skipped_reasons.get('no_price', 0) + 1
+                            continue
                     
                     current_price = current_prices[asset]
                     
                     # Check if already have a trade for this forecast
-                    trades = self.db.get_trades_by_forecast_id(forecast['id'])
-                    if trades:
-                        continue  # Already traded on this forecast
+                    try:
+                        trades = self.db.get_trades_by_forecast_id(forecast['id'])
+                        if trades:
+                            skipped_reasons['already_traded'] = skipped_reasons.get('already_traded', 0) + 1
+                            continue
+                    except Exception:
+                        pass  # If method fails, proceed (don't block trading)
+                    
+                    # Check forecast fields
+                    confidence = forecast.get('confidence', 0)
+                    direction = forecast.get('direction', 'NEUTRAL')
+                    
+                    if direction == 'NEUTRAL':
+                        skipped_reasons['neutral'] = skipped_reasons.get('neutral', 0) + 1
+                        continue
+                    
+                    if confidence < config.MIN_CONFIDENCE_FOR_TRADE:
+                        skipped_reasons['low_confidence'] = skipped_reasons.get('low_confidence', 0) + 1
+                        continue
                     
                     # Evaluate if should trade
                     trade = self.trader.evaluate_forecast_for_trading(forecast, current_price)
                     
                     if trade:
                         # Execute trade
-                        trade_id = self.db.insert_paper_trade(trade)
-                        if trade_id:
-                            trades_executed += 1
-                            print(f"🎯 Auto-trade executed: {trade['asset']} {trade['side']} @ ${current_price:.2f}")
+                        try:
+                            trade_id = self.db.insert_paper_trade(trade)
+                            if trade_id:
+                                # Increment trade counter
+                                try:
+                                    self.db.increment_trade_counter()
+                                except Exception:
+                                    pass
+                                trades_executed += 1
+                                print(f"🎯 Auto-trade executed: {trade['asset']} {trade['side']} @ ${current_price:.2f} (conf: {confidence:.0f}%)")
+                        except Exception as e:
+                            print(f"Trade insert error: {e}")
+                    else:
+                        skipped_reasons['guardrails'] = skipped_reasons.get('guardrails', 0) + 1
                 
                 except Exception as e:
                     print(f"Error evaluating forecast {forecast.get('id')}: {e}")
@@ -381,6 +440,8 @@ class StreamlitWorker:
             
             if trades_executed > 0:
                 print(f"✅ Executed {trades_executed} auto-trades")
+            else:
+                print(f"⚠️ 0 trades executed. Skipped: {skipped_reasons}")
         
         except Exception as e:
             print(f"Auto-trading error: {e}")
