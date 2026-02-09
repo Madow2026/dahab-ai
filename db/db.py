@@ -1296,6 +1296,18 @@ class Database:
             'errors': errors,
         }
     
+    def evaluate_due_forecasts(self, max_window_hours: int = 6) -> int:
+        """Evaluate due forecasts and return count (worker-friendly wrapper).
+        
+        This is the simplified interface called by the worker.
+        Returns the number of forecasts evaluated.
+        """
+        result = self.evaluate_due_forecasts_backfill(
+            max_window_hours=max_window_hours, 
+            limit=500  # Process more in each cycle for faster catch-up
+        )
+        return result.get('evaluated', 0)
+    
     def get_active_forecasts(self, limit: int = 100) -> List[Dict]:
         """Get active forecasts"""
         conn = self.get_connection()
