@@ -31,7 +31,7 @@ INITIAL_EQUITY = 1000.0
 
 # Risk management
 MAX_RISK_PER_TRADE = 0.01  # 1% of equity per trade
-MIN_CONFIDENCE_FOR_TRADE = 70.0  # Only trade forecasts >= 70% confidence
+MIN_CONFIDENCE_FOR_TRADE = 50.0  # Only trade forecasts >= 50% confidence
 MIN_IMPACT_LEVEL = "MEDIUM"  # Minimum impact level (LOW/MEDIUM/HIGH)
 
 # Position limits

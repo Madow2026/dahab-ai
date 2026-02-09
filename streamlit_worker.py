@@ -107,6 +107,9 @@ class StreamlitWorker:
                 # Generate forecasts
                 self._safe_run('Forecasts', self._generate_forecasts)
                 
+                # Execute auto-trades from forecasts
+                self._safe_run('Auto Trading', self._execute_auto_trades)
+                
                 # Evaluate trades
                 self._safe_run('Trade Eval', self._evaluate_trades)
                 
@@ -314,6 +317,73 @@ class StreamlitWorker:
                     
         except Exception as e:
             print(f"Forecast generation error: {e}")
+    
+    def _execute_auto_trades(self):
+        """Execute auto-trades based on recent forecasts"""
+        try:
+            # Get recent active forecasts (not yet traded)
+            recent_forecasts = self.db.get_active_forecasts(limit=50)
+            
+            if not recent_forecasts:
+                return
+            
+            # Get current prices
+            current_prices = {}
+            try:
+                prices = self.market_data.fetch_all_prices()
+                for asset, price_data in prices.items():
+                    if price_data and price_data.get('price'):
+                        current_prices[asset] = price_data['price']
+            except Exception:
+                # Fallback to cached or last known prices
+                for forecast in recent_forecasts:
+                    asset = forecast.get('asset')
+                    if asset and asset not in current_prices:
+                        try:
+                            cached = self.market_data.get_cached_price(asset)
+                            if cached and cached.get('price'):
+                                current_prices[asset] = cached['price']
+                            else:
+                                last = self.db.get_latest_price(asset)
+                                if last and last.get('price'):
+                                    current_prices[asset] = float(last['price'])
+                        except Exception:
+                            pass
+            
+            trades_executed = 0
+            
+            for forecast in recent_forecasts:
+                try:
+                    asset = forecast.get('asset')
+                    if not asset or asset not in current_prices:
+                        continue
+                    
+                    current_price = current_prices[asset]
+                    
+                    # Check if already have a trade for this forecast
+                    trades = self.db.get_trades_by_forecast_id(forecast['id'])
+                    if trades:
+                        continue  # Already traded on this forecast
+                    
+                    # Evaluate if should trade
+                    trade = self.trader.evaluate_forecast_for_trading(forecast, current_price)
+                    
+                    if trade:
+                        # Execute trade
+                        trade_id = self.db.insert_paper_trade(trade)
+                        if trade_id:
+                            trades_executed += 1
+                            print(f"🎯 Auto-trade executed: {trade['asset']} {trade['side']} @ ${current_price:.2f}")
+                
+                except Exception as e:
+                    print(f"Error evaluating forecast {forecast.get('id')}: {e}")
+                    continue
+            
+            if trades_executed > 0:
+                print(f"✅ Executed {trades_executed} auto-trades")
+        
+        except Exception as e:
+            print(f"Auto-trading error: {e}")
     
     def _evaluate_trades(self):
         """Evaluate closed trades"""

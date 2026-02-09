@@ -1614,6 +1614,28 @@ class Database:
         conn.close()
         return results
     
+    def get_trades_by_forecast_id(self, forecast_id: int) -> List[Dict]:
+        """Get all trades associated with a forecast"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM paper_trades
+            WHERE forecast_id = ?
+        """, (forecast_id,))
+        
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return results
+    
+    def insert_paper_trade(self, trade_data: Dict) -> int:
+        """Alias for insert_trade() - for clarity in auto-trading context"""
+        return self.insert_trade(trade_data)
+    
+    def get_open_paper_trades(self) -> List[Dict]:
+        """Alias for get_open_trades() - for clarity in worker context"""
+        return self.get_open_trades()
+    
     def get_all_trades(self, limit: int = 100) -> List[Dict]:
         """Get all trades"""
         conn = self.get_connection()
