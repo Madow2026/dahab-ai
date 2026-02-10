@@ -328,7 +328,7 @@ asset_filter = st.sidebar.selectbox(
 
 status_filter = st.sidebar.selectbox(
     "Status",
-    ["Active", "Evaluated"]
+    ["All", "Active", "Evaluated"]
 )
 
 risk_filter = st.sidebar.selectbox(
@@ -341,9 +341,60 @@ direction_filter = st.sidebar.selectbox(
     ["All", "UP", "DOWN", "NEUTRAL"]
 )
 
-# Main content
-st.subheader("📊 Forecasts Dashboard")
+time_range_filter = st.sidebar.selectbox(
+    "Time Range",
+    ["All Time", "Last 24 Hours", "Last 7 Days", "Last 30 Days", "Last 90 Days"]
+)
 
+# Map time range filter to days
+_DAYS_MAP = {
+    "All Time": None,
+    "Last 24 Hours": 1,
+    "Last 7 Days": 7,
+    "Last 30 Days": 30,
+    "Last 90 Days": 90,
+}
+days_filter = _DAYS_MAP.get(time_range_filter)
+
+# ========================================================================
+# OVERALL SUMMARY (all-time stats)
+# ========================================================================
+st.subheader("📊 Recommendations Summary")
+
+try:
+    summary_stats = db.get_forecasts_summary_stats()
+except Exception:
+    summary_stats = {}
+
+col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
+with col_s1:
+    st.metric("Total Recommendations", summary_stats.get('total', 0))
+with col_s2:
+    st.metric("Active", summary_stats.get('active', 0))
+with col_s3:
+    st.metric("Evaluated", summary_stats.get('evaluated', 0))
+with col_s4:
+    hits = summary_stats.get('hits', 0) or 0
+    misses = summary_stats.get('misses', 0) or 0
+    total_eval = hits + misses
+    acc = (hits / total_eval * 100) if total_eval > 0 else 0
+    st.metric("Overall Accuracy", f"{acc:.1f}%", f"{hits}/{total_eval}")
+with col_s5:
+    avg_conf = summary_stats.get('avg_confidence', 0) or 0
+    st.metric("Avg Confidence", f"{avg_conf:.1f}%")
+
+# Worker status indicator
+worker_alive = db.is_worker_alive(max_stale_seconds=120)
+if worker_alive:
+    st.success("🟢 Worker is running — recommendations are being generated continuously (even when this page is closed)")
+else:
+    st.warning("🟡 Worker starting up... Recommendations will resume shortly")
+
+st.markdown("---")
+
+# ========================================================================
+# VISUAL OUTLOOK CHARTS
+# ========================================================================
 st.subheader("AI Price Forecasts – Visual Outlook")
 st.caption("Historical prices and the latest forecast per asset (DB-only).")
 
@@ -359,66 +410,80 @@ for i, asset in enumerate(ASSETS):
 
 st.markdown("---")
 
-# Get forecasts based on status
+# ========================================================================
+# ALL RECOMMENDATIONS HISTORY
+# ========================================================================
+st.subheader("📋 All Recommendations (Past & Current)")
+st.caption("All recommendations are stored permanently. They continue to be generated and evaluated even when the website is closed.")
+
+# Fetch all forecasts using unified query with filters
+_status_arg = None
 if status_filter == "Active":
-    forecasts = db.get_active_forecasts(limit=100)
-else:
-    # Get evaluated forecasts
-    forecasts = []
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM forecasts
-        WHERE status = 'evaluated'
-        ORDER BY COALESCE(evaluated_at, evaluation_time) DESC
-        LIMIT 100
-    """)
-    forecasts = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    _status_arg = "active"
+elif status_filter == "Evaluated":
+    _status_arg = "evaluated"
 
-# Apply filters
-if asset_filter != "All":
-    forecasts = [f for f in forecasts if f.get('asset') == asset_filter]
-
-if risk_filter != "All":
-    forecasts = [f for f in forecasts if f.get('risk_level') == risk_filter]
-
-if direction_filter != "All":
-    forecasts = [f for f in forecasts if f.get('direction') == direction_filter]
+forecasts = db.get_all_forecasts_history(
+    limit=1000,
+    asset=asset_filter if asset_filter != "All" else None,
+    status=_status_arg,
+    direction=direction_filter if direction_filter != "All" else None,
+    risk_level=risk_filter if risk_filter != "All" else None,
+    days=days_filter,
+)
 
 # Display count
-st.caption(f"Showing {len(forecasts)} forecasts | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Showing {len(forecasts)} recommendations | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if not forecasts:
-    st.info("📭 No forecasts found matching filters. Worker is continuously generating forecasts...")
+    st.info("📭 No recommendations found matching filters. Worker is continuously generating forecasts...")
 else:
     # Stats row
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         up_count = len([f for f in forecasts if f.get('direction') == 'UP'])
-        st.metric("Bullish Forecasts", up_count)
+        st.metric("▲ Bullish", up_count)
     
     with col2:
         down_count = len([f for f in forecasts if f.get('direction') == 'DOWN'])
-        st.metric("Bearish Forecasts", down_count)
+        st.metric("▼ Bearish", down_count)
     
     with col3:
         avg_confidence = sum(f.get('confidence', 0) for f in forecasts) / len(forecasts)
         st.metric("Avg Confidence", f"{avg_confidence:.1f}%")
-    
+
     with col4:
-        if status_filter == "Evaluated":
-            hits = len([f for f in forecasts if f.get('evaluation_result') == 'hit'])
-            accuracy = (hits / len(forecasts) * 100) if forecasts else 0
-            st.metric("Accuracy", f"{accuracy:.1f}%")
-        else:
-            st.metric("Status", "Active")
+        evaluated_in_view = [f for f in forecasts if f.get('status') == 'evaluated']
+        hits_in_view = len([f for f in evaluated_in_view if f.get('evaluation_result') == 'hit'])
+        total_eval_in_view = len(evaluated_in_view)
+        accuracy_in_view = (hits_in_view / total_eval_in_view * 100) if total_eval_in_view > 0 else 0
+        st.metric("Accuracy (filtered)", f"{accuracy_in_view:.1f}%", f"{hits_in_view}/{total_eval_in_view}")
+
+    with col5:
+        active_in_view = len([f for f in forecasts if f.get('status') == 'active'])
+        st.metric("⏳ Pending", active_in_view)
     
     st.markdown("---")
+
+    # Pagination
+    ITEMS_PER_PAGE = 50
+    total_pages = max(1, (len(forecasts) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    
+    if total_pages > 1:
+        page_num = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
+    else:
+        page_num = 1
+    
+    start_idx = (page_num - 1) * ITEMS_PER_PAGE
+    end_idx = min(start_idx + ITEMS_PER_PAGE, len(forecasts))
+    page_forecasts = forecasts[start_idx:end_idx]
+    
+    if total_pages > 1:
+        st.caption(f"Page {page_num}/{total_pages} — showing {start_idx+1}-{end_idx} of {len(forecasts)}")
     
     # Display forecasts
-    for forecast in forecasts[:50]:  # Show top 50
+    for forecast in page_forecasts:
         asset = str(forecast.get("asset") or "N/A")
         direction = str(forecast.get("direction") or "NEUTRAL").upper()
         icon, dir_label, dir_color = _direction_meta(direction)
@@ -432,7 +497,24 @@ else:
         due_text = _fmt_dt(due_dt) if due_dt else "—"
 
         status = str(forecast.get("status") or "").lower()
-        status_text = "Active" if status == "active" else "Evaluated" if status == "evaluated" else (status.title() or "Unknown")
+        eval_result = str(forecast.get("evaluation_result") or "").lower()
+
+        # Enhanced status display with evaluation result
+        if status == "evaluated":
+            if eval_result == "hit":
+                status_html = '<span style="color:#78D2B9;font-weight:700">✅ HIT</span>'
+            elif eval_result == "miss":
+                status_html = '<span style="color:#E6A0A0;font-weight:700">❌ MISS</span>'
+            else:
+                status_html = '<span style="color:#96A0AF">Evaluated</span>'
+        elif status == "active":
+            # Check if overdue
+            if due_dt and due_dt < datetime.now():
+                status_html = '<span style="color:#E6C860">⏰ Overdue</span>'
+            else:
+                status_html = '<span style="color:#60B0E6">⏳ Active</span>'
+        else:
+            status_html = f'<span style="color:#96A0AF">{status.title() or "Unknown"}</span>'
 
         st.markdown(
             f"""
@@ -444,7 +526,7 @@ else:
           <span class="meta-pill">{confidence:.0f}%</span>
           <span class="meta-pill">{risk}</span>
           <span class="meta-pill">{horizon}m</span>
-          <span class="meta-pill">{status_text}</span>
+          {status_html}
         </div>
         <div class="forecast-right">
           <div><span class="subtle">Created</span> {created_text}</div>
@@ -479,20 +561,31 @@ else:
                 if price0 is not None and str(price0) != "":
                     st.metric("Price at Forecast", f"{_safe_float(price0):.4f}")
                 if status == "evaluated":
-                    result = str(forecast.get("evaluation_result") or "").lower()
-                    if result == "hit":
-                        st.success("HIT")
-                    elif result == "miss":
-                        st.error("MISS")
+                    if eval_result == "hit":
+                        st.success("✅ HIT — Direction correct")
+                    elif eval_result == "miss":
+                        st.error("❌ MISS — Direction incorrect")
                     else:
                         st.info("Evaluated")
                     if forecast.get("actual_direction"):
-                        st.caption(f"Actual: {forecast.get('actual_direction')}")
+                        st.caption(f"Predicted: {direction} → Actual: {forecast.get('actual_direction')}")
                     if forecast.get("actual_return") is not None:
                         st.metric("Actual Return", f"{_safe_float(forecast.get('actual_return')):+.2f}%")
+                    actual_price = forecast.get("actual_price") or forecast.get("price_at_evaluation")
+                    if actual_price is not None and str(actual_price) != "":
+                        st.metric("Actual Price", f"{_safe_float(actual_price):.4f}")
+                elif status == "active":
+                    if due_dt:
+                        remaining = due_dt - datetime.now()
+                        if remaining.total_seconds() > 0:
+                            hours = int(remaining.total_seconds() // 3600)
+                            mins = int((remaining.total_seconds() % 3600) // 60)
+                            st.info(f"⏳ Due in {hours}h {mins}m")
+                        else:
+                            st.warning("⏰ Overdue — awaiting evaluation")
     
-    if len(forecasts) > 50:
-        st.info(f"Showing top 50 of {len(forecasts)} forecasts.")
+    if total_pages > 1:
+        st.caption(f"Page {page_num} of {total_pages} — {len(forecasts)} total recommendations")
 
 # Disclaimer
 st.markdown("---")

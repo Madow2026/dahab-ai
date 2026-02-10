@@ -4,6 +4,7 @@ Enhanced Database Manager for Automated Dahab AI
 
 import sqlite3
 import json
+import shutil
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 import config
@@ -11,12 +12,51 @@ import os
 
 
 _SCHEMA_SUMMARY_LOGGED = False
+_BACKUP_DONE = False
 
 class Database:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or config.DATABASE_PATH
+        self._auto_backup()
         self.init_database()
         self._run_schema_validation()
+
+    def _auto_backup(self):
+        """Create a daily backup of the database to prevent data loss."""
+        global _BACKUP_DONE
+        if _BACKUP_DONE:
+            return
+        _BACKUP_DONE = True
+
+        try:
+            if not os.path.exists(self.db_path):
+                return
+            db_size = os.path.getsize(self.db_path)
+            if db_size < 50000:  # Skip backup for nearly-empty DBs (< 50KB)
+                return
+
+            backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.db_path)), "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            today = datetime.now().strftime("%Y-%m-%d")
+            backup_path = os.path.join(backup_dir, f"dahab_ai_{today}.db")
+
+            if not os.path.exists(backup_path):
+                shutil.copy2(self.db_path, backup_path)
+                print(f"💾 Daily backup created: {backup_path}")
+
+            # Keep only last 7 backups
+            backups = sorted([
+                f for f in os.listdir(backup_dir)
+                if f.startswith("dahab_ai_") and f.endswith(".db")
+            ])
+            while len(backups) > 7:
+                old = backups.pop(0)
+                try:
+                    os.remove(os.path.join(backup_dir, old))
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Warning: Auto-backup failed: {e}")
     
     def _run_schema_validation(self):
         """Run schema validation and migration on startup"""
@@ -1854,6 +1894,109 @@ class Database:
         conn.close()
         
         return dict(row) if row else None
+
+    # ========================================================================
+    # ALL FORECASTS HISTORY (Persistent Recommendations)
+    # ========================================================================
+
+    def get_all_forecasts_history(self, limit: int = 1000, asset: str = None,
+                                   status: str = None, direction: str = None,
+                                   risk_level: str = None, days: int = None) -> List[Dict]:
+        """Get all forecasts (active + evaluated) with optional filters.
+
+        Returns all recommendations history for display when app reopens.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        conditions = []
+        params = []
+
+        if asset and asset != "All":
+            conditions.append("asset = ?")
+            params.append(asset)
+
+        if status and status.lower() == "active":
+            conditions.append("status = 'active'")
+        elif status and status.lower() == "evaluated":
+            conditions.append("status = 'evaluated'")
+        # else: no status filter => show all
+
+        if direction and direction != "All":
+            conditions.append("direction = ?")
+            params.append(direction.upper())
+
+        if risk_level and risk_level != "All":
+            conditions.append("risk_level = ?")
+            params.append(risk_level.upper())
+
+        if days and days > 0:
+            conditions.append(f"datetime(COALESCE(created_at, due_at)) > datetime('now', '-{int(days)} days')")
+
+        where = ""
+        if conditions:
+            where = "WHERE " + " AND ".join(conditions)
+
+        cursor.execute(f"""
+            SELECT * FROM forecasts
+            {where}
+            ORDER BY datetime(COALESCE(created_at, due_at)) DESC
+            LIMIT ?
+        """, (*params, limit))
+
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return results
+
+    def get_forecasts_summary_stats(self) -> Dict[str, Any]:
+        """Get summary statistics for all forecasts."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+                    SUM(CASE WHEN status = 'evaluated' THEN 1 ELSE 0 END) as evaluated,
+                    SUM(CASE WHEN evaluation_result = 'hit' THEN 1 ELSE 0 END) as hits,
+                    SUM(CASE WHEN evaluation_result = 'miss' THEN 1 ELSE 0 END) as misses,
+                    AVG(confidence) as avg_confidence,
+                    MIN(datetime(COALESCE(created_at, due_at))) as first_forecast,
+                    MAX(datetime(COALESCE(created_at, due_at))) as last_forecast
+                FROM forecasts
+            """)
+            row = cursor.fetchone()
+            if not row:
+                return {}
+            result = dict(row)
+            total_eval = (result.get('hits') or 0) + (result.get('misses') or 0)
+            result['accuracy_rate'] = ((result.get('hits') or 0) / total_eval * 100) if total_eval > 0 else 0
+            return result
+        finally:
+            conn.close()
+
+    def is_worker_alive(self, max_stale_seconds: int = 120) -> bool:
+        """Check if worker process is alive via DB heartbeat."""
+        try:
+            status = self.get_worker_status()
+            if not status:
+                return False
+            heartbeat = status.get('last_heartbeat') or status.get('last_heartbeat_at')
+            if not heartbeat:
+                return False
+            hb_str = str(heartbeat).replace('Z', '+00:00')
+            try:
+                hb_dt = datetime.fromisoformat(hb_str)
+            except Exception:
+                return False
+            if hb_dt.tzinfo:
+                now = datetime.now(timezone.utc)
+            else:
+                now = datetime.now()
+            diff = (now - hb_dt).total_seconds()
+            return diff < max_stale_seconds
+        except Exception:
+            return False
 
 
 # Singleton

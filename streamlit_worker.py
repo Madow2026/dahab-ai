@@ -6,7 +6,10 @@ Runs worker tasks in background threads compatible with Streamlit Cloud
 import threading
 import time
 import traceback
-from datetime import datetime
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
 import socket
 
 from db.db import get_db
@@ -499,8 +502,74 @@ def get_streamlit_worker() -> StreamlitWorker:
     return _worker
 
 
+def _start_external_worker() -> bool:
+    """Start worker.py as a fully detached background process.
+
+    This allows the worker to keep running even when Streamlit is closed,
+    ensuring continuous recommendation generation and evaluation.
+    """
+    worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker.py')
+    if not os.path.exists(worker_script):
+        return False
+
+    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker_output.log')
+
+    try:
+        if os.name == 'nt':
+            # Windows: fully detached process that survives parent exit
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            fh = open(log_file, 'a', encoding='utf-8')
+            subprocess.Popen(
+                [sys.executable, worker_script],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+            )
+        else:
+            # Unix: start_new_session detaches from parent
+            fh = open(log_file, 'a', encoding='utf-8')
+            subprocess.Popen(
+                [sys.executable, worker_script],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                start_new_session=True,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+            )
+        print("🚀 External worker process launched (persistent)")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to start external worker: {e}")
+        return False
+
+
 def ensure_worker_running():
-    """Ensure background worker is running (call from Streamlit pages)"""
+    """Ensure background worker is running (call from Streamlit pages).
+
+    Strategy:
+    1. Check if an external worker.py process is already alive (via DB heartbeat)
+    2. If not, start worker.py as a detached background process
+    3. Fallback to in-process StreamlitWorker thread
+
+    The external worker keeps running even when Streamlit is closed,
+    so recommendations continue to be generated and evaluated 24/7.
+    """
+    db = get_db()
+
+    # 1. Check if external worker is already running
+    if db.is_worker_alive(max_stale_seconds=120):
+        return  # External worker is handling everything
+
+    # 2. Try to start external worker process (persistent)
+    if _start_external_worker():
+        # Give it a moment to start and write first heartbeat
+        time.sleep(3)
+        if db.is_worker_alive(max_stale_seconds=120):
+            return  # External worker started successfully
+
+    # 3. Fallback: in-process worker thread
     worker = get_streamlit_worker()
     if not worker.running:
         worker.start()
