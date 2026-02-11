@@ -414,13 +414,38 @@ class StreamlitWorker:
                     elif not isinstance(affected_assets, list):
                         affected_assets = []
 
+                    # Normalize and ensure Gold is included for macro categories that typically affect Gold.
+                    affected_assets = [str(a).strip() for a in affected_assets if str(a).strip()]
+                    category = (news_item.get('category') or 'general')
+                    gold_relevant = {
+                        'interest_rates',
+                        'inflation',
+                        'employment',
+                        'gdp',
+                        'geopolitics',
+                        'general',
+                    }
+                    if (category in gold_relevant) and ('Gold' not in affected_assets):
+                        affected_assets.append('Gold')
+
+                    # If still empty, default to Gold (keeps dashboard horizons continuously populated).
+                    if not affected_assets:
+                        affected_assets = ['Gold']
+
                     analysis = {
-                        'category': (news_item.get('category') or 'general'),
+                        'category': category,
                         'sentiment': (news_item.get('sentiment') or 'neutral'),
                         'impact_level': (news_item.get('impact_level') or 'LOW'),
                         'confidence': float(news_item.get('confidence') or 50.0),
                         'affected_assets': affected_assets,
                     }
+
+                    # Keep baseline-level confidence when we had to infer assets.
+                    try:
+                        if news_item.get('affected_assets') in (None, '', []):
+                            analysis['confidence'] = min(float(analysis.get('confidence') or 35.0), 35.0)
+                    except Exception:
+                        pass
 
                     forecasts = self.forecaster.generate_forecasts(news_item, analysis, current_prices)
 

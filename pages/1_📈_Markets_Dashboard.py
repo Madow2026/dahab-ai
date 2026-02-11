@@ -536,6 +536,85 @@ try:
 
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
+        # Trend chart: how the forecast updates over time vs actual outcomes.
+        st.subheader("📉 Gold Forecast vs Actual (Trend)")
+        wanted = ["15m", "60m", "6h", "12h", "36h", "48h", "72h"]
+        selected_h = st.selectbox("Horizon", wanted, index=1)
+
+        try:
+            hist = db.get_all_forecasts_history(limit=2000, asset="Gold", days=30) or []
+        except Exception:
+            hist = gold_forecasts or []
+
+        series = []
+        for f in hist:
+            if _fmt_horizon_label(f) != selected_h:
+                continue
+            created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
+            if not created_dt:
+                continue
+
+            direction = str(f.get("direction") or "").upper()
+            predicted = f.get("predicted_price")
+            predicted_f = None
+            if predicted is not None and str(predicted) != "":
+                predicted_f = _safe_float(predicted, default=math.nan)
+            if predicted_f is None or math.isnan(predicted_f):
+                price0 = f.get("price_at_forecast")
+                hm = int(_safe_float(f.get("horizon_minutes"), 0))
+                proj = _project_predicted_price(
+                    price0,
+                    direction=direction,
+                    confidence_pct=_safe_float(f.get("confidence"), 0.0),
+                    horizon_minutes=hm,
+                )
+                if not math.isnan(proj):
+                    predicted_f = proj
+
+            actual = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
+            actual_f = None
+            if actual is not None and str(actual) != "":
+                actual_f = _safe_float(actual, default=math.nan)
+
+            due_dt = _parse_dt(f.get("due_at"))
+            eval_dt = _parse_dt(f.get("evaluated_at"))
+            actual_x = eval_dt or due_dt
+
+            series.append(
+                {
+                    "created": created_dt,
+                    "pred": predicted_f,
+                    "actual": actual_f,
+                    "actual_x": actual_x,
+                    "status": str(f.get("status") or "").lower(),
+                }
+            )
+
+        if not series:
+            st.info("No forecast history for this horizon yet.")
+        else:
+            series = sorted(series, key=lambda r: r["created"])
+            x_pred = [r["created"] for r in series if r.get("pred") is not None and not math.isnan(r.get("pred"))]
+            y_pred = [r["pred"] for r in series if r.get("pred") is not None and not math.isnan(r.get("pred"))]
+
+            x_act = [r["actual_x"] for r in series if r.get("actual_x") and r.get("actual") is not None and not math.isnan(r.get("actual"))]
+            y_act = [r["actual"] for r in series if r.get("actual_x") and r.get("actual") is not None and not math.isnan(r.get("actual"))]
+
+            fig2 = go.Figure()
+            if x_pred and y_pred:
+                fig2.add_trace(go.Scatter(x=x_pred, y=y_pred, mode="lines+markers", name="Forecast"))
+            if x_act and y_act:
+                fig2.add_trace(go.Scatter(x=x_act, y=y_act, mode="markers", name="Actual"))
+
+            fig2.update_layout(
+                height=360,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Time (UTC)",
+                yaxis_title="Gold Price",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
     st.markdown("---")
 
     # High-impact alerts
