@@ -70,6 +70,22 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _fmt_horizon(forecast: Dict[str, Any]) -> str:
+    """Human-friendly horizon label (prefers horizon_key)."""
+    hk = str(forecast.get('horizon_key') or '').strip()
+    if hk:
+        return hk
+
+    hm = int(_safe_float(forecast.get('horizon_minutes'), 0))
+    if hm <= 0:
+        return '—'
+    if hm % (24 * 60) == 0:
+        return f"{hm // (24 * 60)}d"
+    if hm % 60 == 0:
+        return f"{hm // 60}h"
+    return f"{hm}m"
+
+
 def _direction_meta(direction: str) -> Tuple[str, str, str]:
     d = str(direction or "").upper()
     if d == "UP":
@@ -170,10 +186,13 @@ def _project_forecast_endpoint(forecast: Dict) -> Tuple[Optional[datetime], Opti
 
     horizon = int(_safe_float(forecast.get("horizon_minutes"), 0))
     base_by_horizon = {
-        15: 0.0010,   # 0.10%
-        60: 0.0025,   # 0.25%
-        240: 0.0060,  # 0.60%
-        1440: 0.0150  # 1.50%
+        15: 0.0010,    # 0.10%
+        60: 0.0025,    # 0.25%
+        240: 0.0060,   # 0.60%
+        720: 0.0100,   # 12h
+        1440: 0.0150,  # 24h
+        4320: 0.0300,  # 72h
+        5760: 0.0400,  # 96h
     }
     base = base_by_horizon.get(horizon, 0.0040)
     pct_f = base * max(0.10, min(1.0, conf))
@@ -489,7 +508,7 @@ else:
         icon, dir_label, dir_color = _direction_meta(direction)
         confidence = _safe_float(forecast.get("confidence"), 0.0)
         risk = str(forecast.get("risk_level") or "N/A").upper()
-        horizon = int(_safe_float(forecast.get("horizon_minutes"), 0))
+        horizon_label = _fmt_horizon(forecast)
 
         created_dt = _parse_dt(forecast.get("created_at") or forecast.get("forecast_time"))
         due_dt = _parse_dt(forecast.get("due_at"))
@@ -525,7 +544,7 @@ else:
           <span class="dir-pill" style="color:{dir_color}">{icon} {dir_label}</span>
           <span class="meta-pill">{confidence:.0f}%</span>
           <span class="meta-pill">{risk}</span>
-          <span class="meta-pill">{horizon}m</span>
+                    <span class="meta-pill">{horizon_label}</span>
           {status_html}
         </div>
         <div class="forecast-right">
@@ -557,9 +576,21 @@ else:
                             st.markdown("Alternative")
                             st.write(str(forecast.get("scenario_alt")))
             with col2:
+                st.metric("Horizon", horizon_label)
+
                 price0 = forecast.get("price_at_forecast")
                 if price0 is not None and str(price0) != "":
                     st.metric("Price at Forecast", f"{_safe_float(price0):.4f}")
+
+                predicted_price = forecast.get("predicted_price")
+                if predicted_price is None or str(predicted_price) == "":
+                    due_dt2, projected_price, method = _project_forecast_endpoint(forecast)
+                    if projected_price is not None:
+                        st.metric("Projected Price", f"{_safe_float(projected_price):.4f}")
+                        st.caption(f"Projection method: {method}")
+                else:
+                    st.metric("Predicted Price", f"{_safe_float(predicted_price):.4f}")
+
                 if status == "evaluated":
                     if eval_result == "hit":
                         st.success("✅ HIT — Direction correct")
@@ -571,9 +602,37 @@ else:
                         st.caption(f"Predicted: {direction} → Actual: {forecast.get('actual_direction')}")
                     if forecast.get("actual_return") is not None:
                         st.metric("Actual Return", f"{_safe_float(forecast.get('actual_return')):+.2f}%")
-                    actual_price = forecast.get("actual_price") or forecast.get("price_at_evaluation")
+
+                    actual_price = (
+                        forecast.get("actual_price")
+                        or forecast.get("price_at_evaluation")
+                        or forecast.get("realized_price")
+                    )
+                    actual_price_f = None
                     if actual_price is not None and str(actual_price) != "":
-                        st.metric("Actual Price", f"{_safe_float(actual_price):.4f}")
+                        actual_price_f = _safe_float(actual_price)
+                        st.metric("Actual Price", f"{actual_price_f:.4f}")
+
+                    pred_abs_error = forecast.get("pred_abs_error")
+                    pred_pct_error = forecast.get("pred_pct_error")
+                    if pred_abs_error is not None and str(pred_abs_error) != "":
+                        st.metric("Abs Error", f"{_safe_float(pred_abs_error):.4f}")
+                    if pred_pct_error is not None and str(pred_pct_error) != "":
+                        st.metric("% Error", f"{_safe_float(pred_pct_error):.2f}%")
+
+                    if (
+                        (pred_abs_error is None or str(pred_abs_error) == "")
+                        and (pred_pct_error is None or str(pred_pct_error) == "")
+                        and predicted_price is not None
+                        and str(predicted_price) != ""
+                        and actual_price_f is not None
+                    ):
+                        pred_f = _safe_float(predicted_price)
+                        abs_err = abs(actual_price_f - pred_f)
+                        pct_err = (abs_err / abs(pred_f) * 100.0) if pred_f else None
+                        st.metric("Abs Error", f"{abs_err:.4f}")
+                        if pct_err is not None:
+                            st.metric("% Error", f"{pct_err:.2f}%")
                 elif status == "active":
                     if due_dt:
                         remaining = due_dt - datetime.now()

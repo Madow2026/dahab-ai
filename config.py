@@ -74,8 +74,9 @@ ENABLE_MULTI_HORIZON_RECOMMENDATIONS = True
 RECOMMENDATION_HORIZONS = {
     '12h': 12 * 60,
     '24h': 24 * 60,
-    '3d': 3 * 24 * 60,
-    '7d': 7 * 24 * 60,
+    # Common research baselines requested by users
+    '72h': 72 * 60,
+    '96h': 96 * 60,
 }
 
 # Event-driven recommendation threshold.
