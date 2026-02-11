@@ -99,6 +99,12 @@ def _fmt_horizon_label(forecast: dict) -> str:
         return "12h"
     if hm == 1440:
         return "24h"
+    if hm == 360:
+        return "6h"
+    if hm == 2160:
+        return "36h"
+    if hm == 2880:
+        return "48h"
     if hm == 4320:
         return "72h"
     if hm == 5760:
@@ -354,18 +360,27 @@ try:
         st.info("No Gold forecasts found yet. The worker may still be generating multi-horizon forecasts.")
     else:
         rows = []
-        # Sort: newest first (already), then prefer showing the 4 target horizons when present
-        preferred = {"12h": 0, "24h": 1, "72h": 2, "96h": 3}
+        # Deduplicate: show latest forecast per horizon
+        wanted = ["15m", "60m", "6h", "12h", "36h", "48h", "72h"]
+        buckets = {k: None for k in wanted}
+
         gold_forecasts_sorted = sorted(
             gold_forecasts,
-            key=lambda f: (
-                _parse_dt(f.get("created_at") or f.get("forecast_time") or f.get("due_at")) or datetime.min,
-                -preferred.get(_fmt_horizon_label(f), 99),
-            ),
+            key=lambda f: _parse_dt(f.get("created_at") or f.get("forecast_time") or f.get("due_at")) or datetime.min,
             reverse=True,
         )
 
-        for f in gold_forecasts_sorted[:25]:
+        for f in gold_forecasts_sorted:
+            h = _fmt_horizon_label(f)
+            if h in buckets and buckets[h] is None:
+                buckets[h] = f
+            if all(buckets.values()):
+                break
+
+        for h in wanted:
+            f = buckets.get(h)
+            if not f:
+                continue
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
             due_dt = _parse_dt(f.get("due_at"))
 

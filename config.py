@@ -72,11 +72,14 @@ FORECAST_HORIZONS = {
 # These are used by the multi-horizon recommendation engine.
 ENABLE_MULTI_HORIZON_RECOMMENDATIONS = True
 RECOMMENDATION_HORIZONS = {
+    # Requested multi-horizon set
+    '15m': 15,
+    '60m': 60,
+    '6h': 6 * 60,
     '12h': 12 * 60,
-    '24h': 24 * 60,
-    # Common research baselines requested by users
+    '36h': 36 * 60,
+    '48h': 48 * 60,
     '72h': 72 * 60,
-    '96h': 96 * 60,
 }
 
 # Event-driven recommendation threshold.
