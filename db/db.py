@@ -184,12 +184,24 @@ class Database:
                     conn.close()
 
                     if news_count is not None:
+                        # If we have no evidence of prior data, an empty DB may be normal:
+                        # - first run after deploy
+                        # - Streamlit Cloud without a background worker
+                        # - new DB path chosen (e.g., moved under /data)
                         if size > 100_000 and news_count == 0:
-                            self.log(
-                                'ERROR',
-                                'Database',
-                                f"Integrity alert: DB file is non-trivial size ({size} bytes) but news rowcount is 0. Possible wrong DB path or overwrite. db_path={self.db_path} tables={table_count}",
-                            )
+                            if prev_news is not None and prev_news >= 500:
+                                self.log(
+                                    'ERROR',
+                                    'Database',
+                                    f"Integrity alert: news rowcount dropped to 0 (prev={prev_news}). Possible wrong DB path or overwrite/deletion. db_path={self.db_path} tables={table_count}",
+                                )
+                            else:
+                                self.log(
+                                    'WARNING',
+                                    'Database',
+                                    f"Integrity note: DB has schema (tables={table_count}, size={size} bytes) but news rowcount is 0. This can be normal on first deploy or if the worker is not running. If unexpected, set DAHAB_DB_PATH to the intended persistent DB. db_path={self.db_path}",
+                                )
+
                         if prev_news is not None and prev_news >= 500 and news_count < int(prev_news * 0.2):
                             self.log(
                                 'ERROR',

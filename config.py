@@ -294,9 +294,19 @@ except Exception:
     DAHAB_AI_DATA_DIR = DAHAB_AI_ROOT
 
 # Allow explicit override for deployments.
-DATABASE_PATH = os.path.abspath(
-    os.getenv("DAHAB_DB_PATH", os.path.join(DAHAB_AI_DATA_DIR, "dahab_ai.db"))
-)
+_DB_OVERRIDE = os.getenv("DAHAB_DB_PATH")
+
+# Backward compatibility:
+# If an older installation used dahab-ai/dahab_ai.db, prefer it when present.
+_LEGACY_DB_PATH = os.path.join(DAHAB_AI_ROOT, "dahab_ai.db")
+_DEFAULT_DB_PATH = os.path.join(DAHAB_AI_DATA_DIR, "dahab_ai.db")
+
+if _DB_OVERRIDE and str(_DB_OVERRIDE).strip():
+    DATABASE_PATH = os.path.abspath(_DB_OVERRIDE)
+elif os.path.exists(_LEGACY_DB_PATH):
+    DATABASE_PATH = os.path.abspath(_LEGACY_DB_PATH)
+else:
+    DATABASE_PATH = os.path.abspath(_DEFAULT_DB_PATH)
 
 # ============================================================================
 # UI SETTINGS
