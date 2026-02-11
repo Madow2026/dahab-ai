@@ -474,16 +474,6 @@ class WorkerProcess:
         print("\n🎯 Generating Forecasts...")
         
         try:
-            # Get unprocessed news with impact analysis
-            unprocessed = self.db.get_unprocessed_news()
-            
-            if not unprocessed:
-                print("   No news pending forecast generation")
-                self.last_forecast_gen = now
-                return
-            
-            print(f"   Found {len(unprocessed)} analyzed news items")
-            
             # Get current prices for forecasting
             current_prices_data = {}
             for asset in ['USD Index', 'Gold', 'Silver', 'Oil', 'Bitcoin']:
@@ -491,6 +481,82 @@ class WorkerProcess:
                 if price_row:
                     # Forecaster expects dict-like price_data, but can also accept float.
                     current_prices_data[asset] = {'price': price_row['price'], 'timestamp': price_row.get('timestamp')}
+
+            # Ensure Gold always has at least one ACTIVE forecast per configured horizon.
+            # This prevents long horizons from remaining empty when news doesn't map to Gold.
+            try:
+                if getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', False) and getattr(config, 'RECOMMENDATION_HORIZONS', None):
+                    asset = 'Gold'
+                    price_data = current_prices_data.get(asset)
+                    if price_data and price_data.get('price') is not None:
+                        expected = [(str(k), int(v)) for k, v in (config.RECOMMENDATION_HORIZONS or {}).items()]
+                        conn = self.db.get_connection()
+                        cur = conn.cursor()
+                        cur.execute(
+                            """
+                            SELECT COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0)
+                            FROM forecasts
+                            WHERE asset = ? AND status = 'active'
+                            """,
+                            (asset,),
+                        )
+                        rows = cur.fetchall() or []
+                        conn.close()
+
+                        active_keys = set()
+                        active_minutes = set()
+                        for hk, hm in rows:
+                            hk = (hk or '').strip()
+                            try:
+                                hm_i = int(hm or 0)
+                            except Exception:
+                                hm_i = 0
+                            if hk:
+                                active_keys.add(hk)
+                            if hm_i:
+                                active_minutes.add(hm_i)
+
+                        missing = [(hk, hm) for hk, hm in expected if hk not in active_keys and hm not in active_minutes]
+                        if missing:
+                            synthetic_news = {
+                                'id': None,
+                                'fetched_at': datetime.utcnow().isoformat(),
+                                'published_at': None,
+                                'title_en': 'Baseline Gold Forecast',
+                            }
+                            analysis = {
+                                'category': 'general',
+                                'sentiment': 'neutral',
+                                'impact_level': 'LOW',
+                                'confidence': 35.0,
+                                'affected_assets': [asset],
+                            }
+                            forecasts = self.forecaster.generate_forecasts(synthetic_news, analysis, {asset: price_data})
+                            missing_set = {hk for hk, _ in missing}
+                            inserted = 0
+                            for f in forecasts or []:
+                                hk = str(f.get('horizon_key') or '').strip()
+                                if hk and hk in missing_set and str(f.get('asset') or '') == asset:
+                                    try:
+                                        f['reasoning'] = f.get('reasoning') or 'Baseline forecast (no specific news)'
+                                        self.db.insert_forecast(f)
+                                        inserted += 1
+                                    except Exception:
+                                        continue
+                            if inserted:
+                                print(f"   🟡 Baseline: inserted {inserted} missing Gold horizons")
+            except Exception:
+                pass
+
+            # Get unprocessed news with impact analysis
+            unprocessed = self.db.get_unprocessed_news()
+
+            if not unprocessed:
+                print("   No news pending forecast generation")
+                self.last_forecast_gen = now
+                return
+
+            print(f"   Found {len(unprocessed)} analyzed news items")
             
             forecast_count = 0
             for news_item in unprocessed:

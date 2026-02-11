@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+import json
 import socket
 
 from db.db import get_db
@@ -241,29 +242,8 @@ class StreamlitWorker:
     def _generate_forecasts(self):
         """Generate forecasts from recent news"""
         try:
-            # Primary: unprocessed news
-            recent_news = self.db.get_unprocessed_news(limit=10) or []
-
-            # Backfill mode: also consider recent news to fill missing horizons
-            try:
-                backfill_news = self.db.get_recent_news(limit=20) or []
-            except Exception:
-                backfill_news = []
-
-            # Deduplicate by id while preserving unprocessed priority
-            by_id = {}
-            for n in recent_news:
-                if n and n.get('id') is not None:
-                    by_id[n['id']] = n
-            for n in backfill_news:
-                if n and n.get('id') is not None and n['id'] not in by_id:
-                    by_id[n['id']] = n
-
-            news_batch = list(by_id.values())
-            if not news_batch:
-                return
-
             # Best-effort current prices (cached or last known from DB)
+            # Build this first so we can create baseline forecasts even when there is no news.
             current_prices = {}
             try:
                 for asset_name in config.ASSETS.keys():
@@ -289,6 +269,115 @@ class StreamlitWorker:
                         current_prices[asset_name] = price_data
             except Exception:
                 current_prices = {}
+
+            # Ensure Gold always has at least one ACTIVE forecast per configured horizon.
+            # This prevents long horizons from showing "no forecast yet" (and thus no Due In).
+            try:
+                if getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', False) and getattr(config, 'RECOMMENDATION_HORIZONS', None):
+                    asset = 'Gold'
+                    price_data = current_prices.get(asset)
+                    if not price_data:
+                        try:
+                            last_known = self.db.get_latest_price(asset)
+                            if last_known and last_known.get('price') is not None:
+                                price_data = {'price': float(last_known.get('price')), 'timestamp': last_known.get('timestamp'), 'stale': True}
+                                current_prices[asset] = price_data
+                        except Exception:
+                            price_data = None
+
+                    if price_data and price_data.get('price') is not None:
+                        expected = [(str(k), int(v)) for k, v in (config.RECOMMENDATION_HORIZONS or {}).items()]
+
+                        conn = self.db.get_connection()
+                        cur = conn.cursor()
+                        cur.execute(
+                            """
+                            SELECT COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0)
+                            FROM forecasts
+                            WHERE asset = ? AND status = 'active'
+                            """,
+                            (asset,),
+                        )
+                        rows = cur.fetchall() or []
+                        conn.close()
+
+                        active_keys = set()
+                        active_minutes = set()
+                        for hk, hm in rows:
+                            hk = (hk or '').strip()
+                            try:
+                                hm_i = int(hm or 0)
+                            except Exception:
+                                hm_i = 0
+                            if hk:
+                                active_keys.add(hk)
+                            if hm_i:
+                                active_minutes.add(hm_i)
+
+                        missing_horizons = [(hk, hm) for hk, hm in expected if hk not in active_keys and hm not in active_minutes]
+                        if missing_horizons:
+                            synthetic_news = {
+                                'id': None,
+                                'fetched_at': datetime.utcnow().isoformat(),
+                                'published_at': None,
+                                'title_en': 'Baseline Gold Forecast',
+                            }
+                            analysis = {
+                                'category': 'general',
+                                'sentiment': 'neutral',
+                                'impact_level': 'LOW',
+                                'confidence': 35.0,
+                                'affected_assets': [asset],
+                            }
+                            forecasts = self.forecaster.generate_forecasts(synthetic_news, analysis, {asset: price_data})
+                            missing_set = {hk for hk, _ in missing_horizons}
+                            inserted = 0
+                            for f in forecasts or []:
+                                hk = str(f.get('horizon_key') or '').strip()
+                                if hk and hk in missing_set and str(f.get('asset') or '') == asset:
+                                    try:
+                                        # Tag baseline to keep auditability in history/debugging.
+                                        try:
+                                            tags = {}
+                                            rt = f.get('reasoning_tags')
+                                            if rt:
+                                                tags = json.loads(rt) if isinstance(rt, str) else (rt or {})
+                                            if isinstance(tags, dict):
+                                                tags['baseline'] = True
+                                                f['reasoning_tags'] = json.dumps(tags, ensure_ascii=False)
+                                        except Exception:
+                                            pass
+                                        f['reasoning'] = f.get('reasoning') or 'Baseline forecast (no specific news)'
+                                        self.db.insert_forecast(f)
+                                        inserted += 1
+                                    except Exception:
+                                        continue
+                            if inserted:
+                                print(f"🟡 Baseline: inserted {inserted} missing Gold horizons")
+            except Exception:
+                pass
+
+            # Primary: unprocessed news
+            recent_news = self.db.get_unprocessed_news(limit=10) or []
+
+            # Backfill mode: also consider recent news to fill missing horizons
+            try:
+                backfill_news = self.db.get_recent_news(limit=20) or []
+            except Exception:
+                backfill_news = []
+
+            # Deduplicate by id while preserving unprocessed priority
+            by_id = {}
+            for n in recent_news:
+                if n and n.get('id') is not None:
+                    by_id[n['id']] = n
+            for n in backfill_news:
+                if n and n.get('id') is not None and n['id'] not in by_id:
+                    by_id[n['id']] = n
+
+            news_batch = list(by_id.values())
+            if not news_batch:
+                return
 
             # Read existing forecasts per news_id once (to avoid duplicates)
             def _existing_keys_for_news(news_id: int):
