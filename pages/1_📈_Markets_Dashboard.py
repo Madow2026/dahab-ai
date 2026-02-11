@@ -126,7 +126,8 @@ def _parse_dt(value) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value))
+        s = str(value).strip().replace('Z', '+00:00')
+        return datetime.fromisoformat(s)
     except Exception:
         return None
 
@@ -416,13 +417,37 @@ try:
             if all(buckets.values()):
                 break
 
+        now_utc = datetime.utcnow()
+
+        def _due_in_text(due_dt: datetime | None) -> str:
+            if not due_dt:
+                return '—'
+            try:
+                # Compare as naive UTC if tzinfo missing.
+                dt = due_dt
+                if getattr(dt, 'tzinfo', None) is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                delta = (dt - now_utc).total_seconds()
+                if delta >= 0:
+                    mins = int(delta // 60)
+                    if mins < 120:
+                        return f"in {mins}m"
+                    return f"in {mins//60}h {mins%60}m"
+                mins = int(abs(delta) // 60)
+                if mins < 120:
+                    return f"overdue {mins}m"
+                return f"overdue {mins//60}h {mins%60}m"
+            except Exception:
+                return '—'
+
         for h in wanted:
             f = buckets.get(h)
             if not f:
                 rows.append(
                     {
-                        "Created": "—",
-                        "Due": "—",
+                        "Created (UTC)": "—",
+                        "Due (UTC)": "—",
+                        "Due In": "—",
                         "Horizon": h,
                         "Direction": "—",
                         "Conf%": "—",
@@ -489,8 +514,9 @@ try:
 
             rows.append(
                 {
-                    "Created": _fmt_dt_short(created_dt),
-                    "Due": _fmt_dt_short(due_dt),
+                    "Created (UTC)": _fmt_dt_short(created_dt),
+                    "Due (UTC)": _fmt_dt_short(due_dt),
+                    "Due In": _due_in_text(due_dt),
                     "Horizon": _fmt_horizon_label(f),
                     "Direction": direction,
                     "Conf%": f"{_safe_float(f.get('confidence'), 0.0):.0f}",
