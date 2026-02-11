@@ -369,6 +369,24 @@ class StreamlitWorker:
                                     'affected_assets': [asset],
                                 }
 
+                                # Direction hint so baseline predictions don't stay NEUTRAL (which yields predicted ~= current).
+                                try:
+                                    ch = None
+                                    if isinstance(price_data, dict):
+                                        ch = price_data.get('change')
+                                        if ch is None and price_data.get('previous_close') is not None and price_data.get('price') is not None:
+                                            ch = float(price_data.get('price')) - float(price_data.get('previous_close'))
+                                    if ch is not None:
+                                        ch = float(ch)
+                                        if ch > 0:
+                                            analysis['direction_hint'] = 'UP'
+                                            analysis['sentiment'] = 'positive'
+                                        elif ch < 0:
+                                            analysis['direction_hint'] = 'DOWN'
+                                            analysis['sentiment'] = 'negative'
+                                except Exception:
+                                    pass
+
                                 # Generate all horizons then keep only the requested one.
                                 forecasts = self.forecaster.generate_forecasts(synthetic_news, analysis, {asset: price_data})
                                 for f in forecasts or []:

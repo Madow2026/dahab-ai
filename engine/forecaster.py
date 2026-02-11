@@ -90,6 +90,19 @@ class Forecaster:
         else:
             current_price = price_data
 
+        # Optional hint (used by baseline forecasts) to avoid always-NEUTRAL predictions.
+        try:
+            hint = str((analysis or {}).get('direction_hint') or '').strip().upper()
+            if str(direction).upper() == 'NEUTRAL' and hint in ('UP', 'DOWN'):
+                direction = hint
+                # Keep confidence conservative for hinted directions.
+                try:
+                    confidence = min(float(confidence), 45.0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         predicted_price = None
         try:
             if current_price is not None and str(current_price) != '':
