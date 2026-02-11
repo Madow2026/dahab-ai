@@ -270,8 +270,8 @@ class StreamlitWorker:
             except Exception:
                 current_prices = {}
 
-            # Ensure Gold always has at least one ACTIVE forecast per configured horizon.
-            # This prevents long horizons from showing "no forecast yet" (and thus no Due In).
+            # Ensure Gold continuously gets forecasts for every configured horizon.
+            # News mapping may not always produce long horizons; this baseline path guarantees coverage.
             try:
                 if getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', False) and getattr(config, 'RECOMMENDATION_HORIZONS', None):
                     asset = 'Gold'
@@ -288,55 +288,60 @@ class StreamlitWorker:
                     if price_data and price_data.get('price') is not None:
                         expected = [(str(k), int(v)) for k, v in (config.RECOMMENDATION_HORIZONS or {}).items()]
 
+                        # Create at most one new baseline per horizon within a recency window.
+                        # This keeps forecasts updating (auto-correction) without flooding the DB.
+                        recency_minutes_default = 30
+                        dt_expr = "datetime(replace(substr(COALESCE(created_at, due_at),1,19),'T',' '))"
+
                         conn = self.db.get_connection()
                         cur = conn.cursor()
-                        cur.execute(
-                            """
-                            SELECT COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0)
-                            FROM forecasts
-                            WHERE asset = ? AND status = 'active'
-                            """,
-                            (asset,),
-                        )
-                        rows = cur.fetchall() or []
-                        conn.close()
+                        inserted = 0
 
-                        active_keys = set()
-                        active_minutes = set()
-                        for hk, hm in rows:
-                            hk = (hk or '').strip()
+                        for hk, hm in expected:
                             try:
-                                hm_i = int(hm or 0)
-                            except Exception:
-                                hm_i = 0
-                            if hk:
-                                active_keys.add(hk)
-                            if hm_i:
-                                active_minutes.add(hm_i)
+                                # Horizon-specific cadence: longer horizons can update less frequently.
+                                cadence = max(30, min(240, int(hm // 6)))  # 30m..4h
+                                cadence = int(cadence or recency_minutes_default)
 
-                        missing_horizons = [(hk, hm) for hk, hm in expected if hk not in active_keys and hm not in active_minutes]
-                        if missing_horizons:
-                            synthetic_news = {
-                                'id': None,
-                                'fetched_at': datetime.utcnow().isoformat(),
-                                'published_at': None,
-                                'title_en': 'Baseline Gold Forecast',
-                            }
-                            analysis = {
-                                'category': 'general',
-                                'sentiment': 'neutral',
-                                'impact_level': 'LOW',
-                                'confidence': 35.0,
-                                'affected_assets': [asset],
-                            }
-                            forecasts = self.forecaster.generate_forecasts(synthetic_news, analysis, {asset: price_data})
-                            missing_set = {hk for hk, _ in missing_horizons}
-                            inserted = 0
-                            for f in forecasts or []:
-                                hk = str(f.get('horizon_key') or '').strip()
-                                if hk and hk in missing_set and str(f.get('asset') or '') == asset:
+                                cur.execute(
+                                    f"""
+                                    SELECT 1
+                                    FROM forecasts
+                                    WHERE asset = ?
+                                      AND (COALESCE(horizon_key,'') = ? OR COALESCE(horizon_minutes,0) = ?)
+                                      AND {dt_expr} >= datetime('now', '-' || ? || ' minutes')
+                                    LIMIT 1
+                                    """,
+                                    (asset, hk, int(hm), int(cadence)),
+                                )
+                                exists_recent = cur.fetchone() is not None
+                                if exists_recent:
+                                    continue
+
+                                synthetic_news = {
+                                    'id': None,
+                                    'fetched_at': datetime.utcnow().isoformat(),
+                                    'published_at': None,
+                                    'title_en': 'Baseline Gold Forecast',
+                                }
+                                analysis = {
+                                    'category': 'general',
+                                    'sentiment': 'neutral',
+                                    'impact_level': 'LOW',
+                                    'confidence': 35.0,
+                                    'affected_assets': [asset],
+                                }
+
+                                # Generate all horizons then keep only the requested one.
+                                forecasts = self.forecaster.generate_forecasts(synthetic_news, analysis, {asset: price_data})
+                                for f in forecasts or []:
+                                    f_hk = str(f.get('horizon_key') or '').strip()
+                                    if str(f.get('asset') or '') != asset:
+                                        continue
+                                    if f_hk != hk:
+                                        continue
                                     try:
-                                        # Tag baseline to keep auditability in history/debugging.
+                                        # Tag baseline to keep auditability.
                                         try:
                                             tags = {}
                                             rt = f.get('reasoning_tags')
@@ -344,16 +349,27 @@ class StreamlitWorker:
                                                 tags = json.loads(rt) if isinstance(rt, str) else (rt or {})
                                             if isinstance(tags, dict):
                                                 tags['baseline'] = True
+                                                tags['baseline_cadence_min'] = int(cadence)
                                                 f['reasoning_tags'] = json.dumps(tags, ensure_ascii=False)
                                         except Exception:
                                             pass
+
                                         f['reasoning'] = f.get('reasoning') or 'Baseline forecast (no specific news)'
                                         self.db.insert_forecast(f)
                                         inserted += 1
                                     except Exception:
-                                        continue
-                            if inserted:
-                                print(f"🟡 Baseline: inserted {inserted} missing Gold horizons")
+                                        pass
+                                    break
+                            except Exception:
+                                continue
+
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
+                        if inserted:
+                            print(f"🟡 Baseline: inserted {inserted} Gold forecasts across horizons")
             except Exception:
                 pass
 
