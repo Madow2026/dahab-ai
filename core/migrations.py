@@ -111,6 +111,147 @@ def migrate_database(db_path: str) -> None:
         )
 
         # ------------------------------------------------------------------
+        # System logs (needed for safety triggers; created in db.init too)
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                level TEXT NOT NULL,
+                module TEXT NOT NULL,
+                message TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON system_logs(timestamp DESC)")
+
+        # ------------------------------------------------------------------
+        # DB meta (integrity + runtime state)
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS db_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+
+        # ------------------------------------------------------------------
+        # Recommendation history (append-only, never deleted)
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recommendation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                forecast_id INTEGER UNIQUE,
+                news_id INTEGER,
+                asset TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry_price REAL,
+                horizon_minutes INTEGER,
+                horizon_key TEXT,
+                predicted_price REAL,
+                confidence REAL,
+                reasoning_tags TEXT,
+                created_at TEXT,
+                due_at TEXT,
+                actual_price REAL,
+                actual_time TEXT,
+                accuracy_pct REAL,
+                abs_error REAL,
+                pct_error REAL,
+                evaluation_result TEXT,
+                evaluated_at TEXT,
+                FOREIGN KEY (forecast_id) REFERENCES forecasts (id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rechist_asset_due ON recommendation_history(asset, due_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rechist_eval ON recommendation_history(evaluated_at)")
+
+        # ------------------------------------------------------------------
+        # Optional news archival table (manual use only; never auto-delete news)
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_archive (
+                id INTEGER PRIMARY KEY,
+                source TEXT,
+                url TEXT,
+                title_en TEXT,
+                body_en TEXT,
+                title_ar TEXT,
+                body_ar TEXT,
+                published_at TEXT,
+                fetched_at TEXT,
+                category TEXT,
+                sentiment TEXT,
+                impact_level TEXT,
+                confidence REAL,
+                affected_assets TEXT,
+                source_reliability REAL,
+                archived_at TEXT NOT NULL,
+                archive_reason TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_news_archive_archived_at ON news_archive(archived_at)")
+
+        # ------------------------------------------------------------------
+        # Calibration stats (rolling accuracy -> confidence weighting)
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calibration_stats (
+                asset TEXT NOT NULL,
+                horizon_minutes INTEGER NOT NULL,
+                news_category TEXT,
+                news_sentiment TEXT,
+                n_total INTEGER NOT NULL DEFAULT 0,
+                n_hit INTEGER NOT NULL DEFAULT 0,
+                rolling_accuracy REAL,
+                weight_multiplier REAL,
+                updated_at TEXT,
+                PRIMARY KEY (asset, horizon_minutes, news_category, news_sentiment)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_calib_asset_h ON calibration_stats(asset, horizon_minutes)")
+
+        # ------------------------------------------------------------------
+        # Safety triggers: log accidental deletions (never auto-delete data)
+        # ------------------------------------------------------------------
+        # Note: triggers only log; they do not block operations.
+        try:
+            if _table_exists(conn, 'news'):
+                conn.execute(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS trg_news_delete
+                    AFTER DELETE ON news
+                    BEGIN
+                        INSERT INTO system_logs (timestamp, level, module, message)
+                        VALUES (datetime('now'), 'ERROR', 'DB', 'DELETE on news detected: id=' || OLD.id || ' source=' || COALESCE(OLD.source,'') || ' url=' || COALESCE(OLD.url,''));
+                    END;
+                    """
+                )
+            if _table_exists(conn, 'forecasts'):
+                conn.execute(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS trg_forecasts_delete
+                    AFTER DELETE ON forecasts
+                    BEGIN
+                        INSERT INTO system_logs (timestamp, level, module, message)
+                        VALUES (datetime('now'), 'ERROR', 'DB', 'DELETE on forecasts detected: id=' || OLD.id || ' asset=' || COALESCE(OLD.asset,''));
+                    END;
+                    """
+                )
+        except Exception:
+            pass
+
+        # ------------------------------------------------------------------
         # Forecasts compatibility columns
         # ------------------------------------------------------------------
         if _table_exists(conn, "forecasts"):
@@ -144,8 +285,33 @@ def migrate_database(db_path: str) -> None:
                 ("confidence_level", "REAL"),
                 ("price_change_percent", "REAL"),
                 ("is_accurate", "INTEGER"),
+
+                # Multi-horizon recommendation extensions (additive)
+                ("horizon_key", "TEXT"),
+                ("predicted_price", "REAL"),
+                ("reasoning_tags", "TEXT"),
+                ("news_category", "TEXT"),
+                ("news_sentiment", "TEXT"),
+                ("impact_level", "TEXT"),
+                ("recommendation_group_id", "TEXT"),
+                ("pred_abs_error", "REAL"),
+                ("pred_pct_error", "REAL"),
+                ("expired_at", "TEXT"),
             ]
             _ensure_columns(conn, "forecasts", required_forecast_cols)
+
+        # ------------------------------------------------------------------
+        # News importance classification (event-driven recommendation triggers)
+        # ------------------------------------------------------------------
+        if _table_exists(conn, 'news'):
+            _ensure_columns(
+                conn,
+                'news',
+                [
+                    ('importance_score', 'REAL'),
+                    ('importance_level', 'TEXT'),
+                ],
+            )
 
             cols = _get_columns(conn, "forecasts")
 

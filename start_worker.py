@@ -19,10 +19,16 @@ print(f"✅ Python {sys.version.split()[0]}")
 
 # Step 2: Check database exists
 print("\n2️⃣ Checking database...")
-if not os.path.exists("dahab_ai.db"):
+try:
+    import config
+    db_path = config.DATABASE_PATH
+except Exception:
+    db_path = "dahab_ai.db"
+
+if not os.path.exists(db_path):
     print("⚠️ Database not found. Will be created on first run.")
 else:
-    print("✅ Database file exists")
+    print(f"✅ Database file exists: {db_path}")
 
 # Step 3: Validate configuration
 print("\n3️⃣ Validating configuration...")

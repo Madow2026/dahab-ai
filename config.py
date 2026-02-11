@@ -68,6 +68,21 @@ FORECAST_HORIZONS = {
     'general': 15,  # 15 minutes (short-term)
 }
 
+# Structured recommendation horizons (required research baseline)
+# These are used by the multi-horizon recommendation engine.
+ENABLE_MULTI_HORIZON_RECOMMENDATIONS = True
+RECOMMENDATION_HORIZONS = {
+    '12h': 12 * 60,
+    '24h': 24 * 60,
+    '3d': 3 * 24 * 60,
+    '7d': 7 * 24 * 60,
+}
+
+# Event-driven recommendation threshold.
+# If an analyzed news item has impact confidence below this threshold,
+# the worker may still store the news but treat recommendations as low priority.
+RECOMMENDATION_IMPACT_THRESHOLD = 55.0
+
 # Impact strength thresholds
 HIGH_IMPACT_CONFIDENCE_BOOST = 10.0
 LOW_IMPACT_CONFIDENCE_PENALTY = 10.0
@@ -262,11 +277,26 @@ TRANSLATION_SOURCE_LANG = 'en'
 TRANSLATION_TARGET_LANG = 'ar'
 TRANSLATION_MAX_LENGTH = 500  # Max chars to translate per text
 
+import os
+
 # ============================================================================
-# DATABASE
+# DATABASE / RUNTIME PATHS
 # ============================================================================
 
-DATABASE_PATH = 'dahab_ai.db'
+# Resolve runtime paths relative to this package so DB location does not depend
+# on the process working directory (worker vs Streamlit vs scripts).
+DAHAB_AI_ROOT = os.path.dirname(os.path.abspath(__file__))
+DAHAB_AI_DATA_DIR = os.getenv("DAHAB_DATA_DIR", os.path.join(DAHAB_AI_ROOT, "data"))
+try:
+    os.makedirs(DAHAB_AI_DATA_DIR, exist_ok=True)
+except Exception:
+    # If the directory can't be created (e.g., permissions), fall back to root.
+    DAHAB_AI_DATA_DIR = DAHAB_AI_ROOT
+
+# Allow explicit override for deployments.
+DATABASE_PATH = os.path.abspath(
+    os.getenv("DAHAB_DB_PATH", os.path.join(DAHAB_AI_DATA_DIR, "dahab_ai.db"))
+)
 
 # ============================================================================
 # UI SETTINGS
@@ -286,7 +316,9 @@ MAX_TRADES_DISPLAY = 30
 
 LOG_LEVEL = 'INFO'  # DEBUG, INFO, WARNING, ERROR
 LOG_TO_FILE = True
-LOG_FILE_PATH = 'dahab_ai.log'
+LOG_FILE_PATH = os.path.abspath(
+    os.getenv("DAHAB_LOG_PATH", os.path.join(DAHAB_AI_DATA_DIR, "dahab_ai.log"))
+)
 
 # ============================================================================
 # DISCLAIMERS

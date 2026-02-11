@@ -5,7 +5,8 @@ Enhanced Database Manager for Automated Dahab AI
 import sqlite3
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import hashlib
 from typing import List, Dict, Optional, Any
 import config
 import os
@@ -16,10 +17,11 @@ _BACKUP_DONE = False
 
 class Database:
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or config.DATABASE_PATH
+        self.db_path = os.path.abspath(db_path or config.DATABASE_PATH)
         self._auto_backup()
         self.init_database()
         self._run_schema_validation()
+        self._integrity_startup_checks()
 
     def _auto_backup(self):
         """Create a daily backup of the database to prevent data loss."""
@@ -43,18 +45,8 @@ class Database:
             if not os.path.exists(backup_path):
                 shutil.copy2(self.db_path, backup_path)
                 print(f"💾 Daily backup created: {backup_path}")
-
-            # Keep only last 7 backups
-            backups = sorted([
-                f for f in os.listdir(backup_dir)
-                if f.startswith("dahab_ai_") and f.endswith(".db")
-            ])
-            while len(backups) > 7:
-                old = backups.pop(0)
-                try:
-                    os.remove(os.path.join(backup_dir, old))
-                except Exception:
-                    pass
+            # Note: we intentionally do NOT delete old backups automatically.
+            # Operators can manage disk space explicitly (manual retention policy).
         except Exception as e:
             print(f"Warning: Auto-backup failed: {e}")
     
@@ -122,9 +114,95 @@ class Database:
     
     def get_connection(self):
         """Get database connection"""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            # Production-safe defaults for concurrent reader/writer workloads.
+            # WAL prevents many "database is locked" scenarios under Streamlit + worker.
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 5000")
+        except Exception:
+            pass
         conn.row_factory = sqlite3.Row  # Enable column access by name
         return conn
+
+    def _integrity_startup_checks(self) -> None:
+        """Detect common "DB reset" failure modes and log loudly.
+
+        This does not modify or delete data.
+        """
+        try:
+            # If the DB file exists but is empty-ish, this is usually a wrong working dir
+            # or an accidental overwrite. We log so it can be caught immediately.
+            if os.path.exists(self.db_path):
+                size = 0
+                try:
+                    size = os.path.getsize(self.db_path)
+                except Exception:
+                    size = 0
+
+                conn = self.get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+                table_count = int(cur.fetchone()[0] or 0)
+
+                news_count = None
+                try:
+                    cur.execute("SELECT COUNT(*) FROM news")
+                    news_count = int(cur.fetchone()[0] or 0)
+                except Exception:
+                    news_count = None
+
+                # Persist last-known counts so we can detect sudden drops.
+                try:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS db_meta (
+                            key TEXT PRIMARY KEY,
+                            value TEXT,
+                            updated_at TEXT
+                        )
+                        """
+                    )
+                    prev_news = None
+                    if news_count is not None:
+                        cur.execute("SELECT value FROM db_meta WHERE key='news_count'")
+                        row = cur.fetchone()
+                        if row and row[0] is not None and str(row[0]).strip() != '':
+                            try:
+                                prev_news = int(row[0])
+                            except Exception:
+                                prev_news = None
+
+                        cur.execute(
+                            "INSERT OR REPLACE INTO db_meta (key, value, updated_at) VALUES (?, ?, ?)",
+                            ('news_count', str(int(news_count)), self._utc_now_iso()),
+                        )
+                        conn.commit()
+
+                    conn.close()
+
+                    if news_count is not None:
+                        if size > 100_000 and news_count == 0:
+                            self.log(
+                                'ERROR',
+                                'Database',
+                                f"Integrity alert: DB file is non-trivial size ({size} bytes) but news rowcount is 0. Possible wrong DB path or overwrite. db_path={self.db_path} tables={table_count}",
+                            )
+                        if prev_news is not None and prev_news >= 500 and news_count < int(prev_news * 0.2):
+                            self.log(
+                                'ERROR',
+                                'Database',
+                                f"Integrity alert: news rowcount dropped sharply ({prev_news} -> {news_count}). Possible accidental deletion/reset. db_path={self.db_path}",
+                            )
+                except Exception:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        except Exception:
+            return
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -188,12 +266,19 @@ class Database:
                 confidence REAL NOT NULL,
                 risk_level TEXT NOT NULL,
                 horizon_minutes INTEGER NOT NULL,
+                horizon_key TEXT,
                 created_at TEXT NOT NULL,
                 due_at TEXT NOT NULL,
                 reasoning TEXT,
                 scenario_base TEXT,
                 scenario_alt TEXT,
                 price_at_forecast REAL,
+                predicted_price REAL,
+                reasoning_tags TEXT,
+                news_category TEXT,
+                news_sentiment TEXT,
+                impact_level TEXT,
+                recommendation_group_id TEXT,
                 status TEXT DEFAULT 'active',
                 evaluation_result TEXT,
                 actual_direction TEXT,
@@ -203,9 +288,12 @@ class Database:
                 direction_correct INTEGER,
                 abs_error REAL,
                 pct_error REAL,
+                pred_abs_error REAL,
+                pred_pct_error REAL,
                 evaluation_quality TEXT,
                 actual_return REAL,
                 evaluated_at TEXT,
+                expired_at TEXT,
                 FOREIGN KEY (news_id) REFERENCES news (id)
             )
         """)
@@ -273,6 +361,17 @@ class Database:
         """)
         
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON system_logs(timestamp DESC)")
+
+        # DB meta (small key/value store for integrity checks and runtime state)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS db_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT
+            )
+            """
+        )
 
         # Worker status table (single row)
         cursor.execute("""
@@ -561,6 +660,34 @@ class Database:
         """, (category, sentiment, impact_level, confidence, affected_assets_json, news_id))
         conn.commit()
         conn.close()
+
+    def update_news_importance(self, news_id: int, importance_score: float, importance_level: str) -> None:
+        """Persist importance classification if the schema supports it."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA table_info(news)")
+            cols = {row[1] for row in cursor.fetchall()}
+        except Exception:
+            cols = set()
+
+        sets = []
+        args: List[Any] = []
+        if 'importance_score' in cols:
+            sets.append("importance_score = ?")
+            args.append(float(importance_score) if importance_score is not None else None)
+        if 'importance_level' in cols:
+            sets.append("importance_level = ?")
+            args.append(str(importance_level or ''))
+
+        if not sets:
+            conn.close()
+            return
+
+        args.append(int(news_id))
+        cursor.execute(f"UPDATE news SET {', '.join(sets)} WHERE id = ?", tuple(args))
+        conn.commit()
+        conn.close()
     
     def mark_news_processed(self, news_id: int):
         """Mark news as processed"""
@@ -569,6 +696,64 @@ class Database:
         cursor.execute("UPDATE news SET processed = 1 WHERE id = ?", (news_id,))
         conn.commit()
         conn.close()
+
+    def archive_news_copy(self, news_id: int, reason: str = 'manual') -> bool:
+        """Copy a news row into news_archive (no deletion).
+
+        This is an operator tool for long-term retention strategies.
+        It never deletes from the primary news table.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT * FROM news WHERE id = ?", (int(news_id),))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            r = dict(row)
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO news_archive (
+                    id, source, url, title_en, body_en, title_ar, body_ar,
+                    published_at, fetched_at, category, sentiment, impact_level,
+                    confidence, affected_assets, source_reliability,
+                    archived_at, archive_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(r.get('id')),
+                    r.get('source'),
+                    r.get('url'),
+                    r.get('title_en'),
+                    r.get('body_en'),
+                    r.get('title_ar'),
+                    r.get('body_ar'),
+                    r.get('published_at'),
+                    r.get('fetched_at'),
+                    r.get('category'),
+                    r.get('sentiment'),
+                    r.get('impact_level'),
+                    r.get('confidence'),
+                    r.get('affected_assets'),
+                    r.get('source_reliability'),
+                    self._utc_now_iso(),
+                    str(reason or 'manual'),
+                ),
+            )
+            conn.commit()
+            try:
+                self.log('INFO', 'Database', f'Archived copy of news_id={news_id} to news_archive (no deletion)')
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            try:
+                self.log('ERROR', 'Database', f'archive_news_copy failed for news_id={news_id}: {e}')
+            except Exception:
+                pass
+            return False
+        finally:
+            conn.close()
     
     def get_recent_news(self, limit: int = 50, hours: int = 24) -> List[Dict]:
         """Get recent news items"""
@@ -1101,32 +1286,91 @@ class Database:
         """Insert forecast"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO forecasts (
-                news_id, asset, direction, confidence, risk_level,
-                horizon_minutes, created_at, due_at, reasoning,
-                scenario_base, scenario_alt, price_at_forecast
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            forecast_data.get('news_id'),
-            forecast_data['asset'],
-            forecast_data['direction'],
-            forecast_data['confidence'],
-            forecast_data['risk_level'],
-            forecast_data['horizon_minutes'],
-            forecast_data['created_at'],
-            forecast_data['due_at'],
-            forecast_data.get('reasoning'),
-            forecast_data.get('scenario_base'),
-            forecast_data.get('scenario_alt'),
-            forecast_data.get('price_at_forecast')
-        ))
+
+        # Dynamic insert to keep compatibility across schema versions.
+        try:
+            cursor.execute("PRAGMA table_info(forecasts)")
+            cols = {row[1] for row in cursor.fetchall()}
+        except Exception:
+            cols = set()
+
+        # Stable group id for multi-horizon forecasts (same news+asset+created_at bucket)
+        if not forecast_data.get('recommendation_group_id'):
+            try:
+                seed = f"{forecast_data.get('news_id')}|{forecast_data.get('asset')}|{str(forecast_data.get('created_at') or '')[:19]}"
+                forecast_data['recommendation_group_id'] = hashlib.sha1(seed.encode('utf-8')).hexdigest()[:16]
+            except Exception:
+                forecast_data['recommendation_group_id'] = None
+
+        field_map = [
+            ('news_id', forecast_data.get('news_id')),
+            ('asset', forecast_data.get('asset')),
+            ('direction', forecast_data.get('direction')),
+            ('confidence', forecast_data.get('confidence')),
+            ('risk_level', forecast_data.get('risk_level')),
+            ('horizon_minutes', forecast_data.get('horizon_minutes')),
+            ('created_at', forecast_data.get('created_at')),
+            ('due_at', forecast_data.get('due_at')),
+            ('reasoning', forecast_data.get('reasoning')),
+            ('scenario_base', forecast_data.get('scenario_base')),
+            ('scenario_alt', forecast_data.get('scenario_alt')),
+            ('price_at_forecast', forecast_data.get('price_at_forecast')),
+        ]
+
+        optional = [
+            ('horizon_key', forecast_data.get('horizon_key')),
+            ('predicted_price', forecast_data.get('predicted_price')),
+            ('reasoning_tags', forecast_data.get('reasoning_tags')),
+            ('news_category', forecast_data.get('news_category')),
+            ('news_sentiment', forecast_data.get('news_sentiment')),
+            ('impact_level', forecast_data.get('impact_level')),
+            ('recommendation_group_id', forecast_data.get('recommendation_group_id')),
+        ]
+        for name, value in optional:
+            if name in cols:
+                field_map.append((name, value))
+
+        fields = [f for f, _ in field_map]
+        values = [v for _, v in field_map]
+        placeholders = ", ".join(["?"] * len(fields))
+
+        cursor.execute(
+            f"INSERT INTO forecasts ({', '.join(fields)}) VALUES ({placeholders})",
+            tuple(values),
+        )
         
         forecast_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return forecast_id
+
+    def expire_forecast(self, forecast_id: int, reason: str = 'expired') -> None:
+        """Mark a forecast as expired (due passed but evaluation impossible).
+
+        This is non-destructive and used to separate ACTIVE vs EXPIRED vs EVALUATED.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA table_info(forecasts)")
+            cols = {row[1] for row in cursor.fetchall()}
+        except Exception:
+            cols = set()
+
+        sets = ["status = 'expired'"]
+        args: List[Any] = []
+        if 'expired_at' in cols:
+            sets.append("expired_at = ?")
+            args.append(self._utc_now_iso())
+        if 'evaluation_quality' in cols:
+            sets.append("evaluation_quality = ?")
+            args.append(reason)
+
+        sql = "UPDATE forecasts SET " + ", ".join(sets) + " WHERE id = ?"
+        args.append(int(forecast_id))
+        cursor.execute(sql, tuple(args))
+        conn.commit()
+        conn.close()
     
     def get_forecasts_due(self) -> List[Dict]:
         """Get forecasts that need evaluation"""
@@ -1233,6 +1477,14 @@ class Database:
             sets.append("pct_error = ?")
             args.append(eval_data.get('pct_error'))
 
+        if 'pred_abs_error' in cols:
+            sets.append("pred_abs_error = ?")
+            args.append(eval_data.get('pred_abs_error'))
+
+        if 'pred_pct_error' in cols:
+            sets.append("pred_pct_error = ?")
+            args.append(eval_data.get('pred_pct_error'))
+
         if 'evaluation_quality' in cols:
             sets.append("evaluation_quality = ?")
             args.append(eval_data.get('evaluation_quality'))
@@ -1246,7 +1498,171 @@ class Database:
         cursor.execute(sql, tuple(args))
         
         conn.commit()
+
+        # Append to history + update calibration (best-effort; never break evaluation)
+        try:
+            frow = self.get_forecast_by_id(int(forecast_id))
+            if frow:
+                self._append_recommendation_history(frow, eval_data)
+                self._update_calibration_stats(frow, eval_data)
+        except Exception:
+            pass
+
         conn.close()
+
+    def _append_recommendation_history(self, forecast_row: Dict, eval_data: Dict) -> None:
+        """Append-only write to recommendation_history (idempotent via UNIQUE forecast_id)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        # Direction-correctness is a primary KPI, but also store a continuous score.
+        try:
+            base_pct_err = eval_data.get('pred_pct_error')
+            if base_pct_err is None:
+                base_pct_err = eval_data.get('pct_error')
+            base_pct_err = float(base_pct_err) if base_pct_err is not None else None
+        except Exception:
+            base_pct_err = None
+
+        try:
+            if base_pct_err is None:
+                accuracy_pct = 100.0 if eval_data.get('direction_correct') else 0.0
+            else:
+                accuracy_pct = max(0.0, min(100.0, 100.0 - base_pct_err))
+        except Exception:
+            accuracy_pct = 0.0
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO recommendation_history (
+                forecast_id, news_id, asset, direction, entry_price,
+                horizon_minutes, horizon_key, predicted_price, confidence,
+                reasoning_tags, created_at, due_at,
+                actual_price, actual_time, accuracy_pct,
+                abs_error, pct_error, evaluation_result, evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(forecast_row.get('id')),
+                forecast_row.get('news_id'),
+                forecast_row.get('asset'),
+                forecast_row.get('direction'),
+                forecast_row.get('price_at_forecast'),
+                forecast_row.get('horizon_minutes'),
+                forecast_row.get('horizon_key'),
+                forecast_row.get('predicted_price'),
+                forecast_row.get('confidence'),
+                forecast_row.get('reasoning_tags'),
+                forecast_row.get('created_at') or forecast_row.get('forecast_time'),
+                forecast_row.get('due_at'),
+                eval_data.get('actual_price') or eval_data.get('price_at_evaluation'),
+                eval_data.get('actual_time'),
+                accuracy_pct,
+                eval_data.get('pred_abs_error') if eval_data.get('pred_abs_error') is not None else eval_data.get('abs_error'),
+                eval_data.get('pred_pct_error') if eval_data.get('pred_pct_error') is not None else eval_data.get('pct_error'),
+                eval_data.get('evaluation_result'),
+                eval_data.get('evaluated_at') or self._utc_now_iso(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def _update_calibration_stats(self, forecast_row: Dict, eval_data: Dict) -> None:
+        """Update rolling calibration stats (no retraining; purely statistical)."""
+        asset = forecast_row.get('asset')
+        horizon = forecast_row.get('horizon_minutes')
+        if not asset or horizon is None:
+            return
+
+        category = forecast_row.get('news_category')
+        sentiment = forecast_row.get('news_sentiment')
+        hit = 1 if eval_data.get('direction_correct') else 0
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT n_total, n_hit, rolling_accuracy
+            FROM calibration_stats
+            WHERE asset = ? AND horizon_minutes = ?
+              AND COALESCE(news_category,'') = COALESCE(?, '')
+              AND COALESCE(news_sentiment,'') = COALESCE(?, '')
+            """,
+            (asset, int(horizon), category, sentiment),
+        )
+        row = cursor.fetchone()
+        if row:
+            n_total = int(row[0] or 0)
+            n_hit = int(row[1] or 0)
+            rolling = row[2]
+            try:
+                rolling = float(rolling) if rolling is not None else None
+            except Exception:
+                rolling = None
+        else:
+            n_total = 0
+            n_hit = 0
+            rolling = None
+
+        n_total2 = n_total + 1
+        n_hit2 = n_hit + hit
+        instant_acc = (hit * 100.0)
+
+        # EWMA rolling accuracy (stable under bursty events)
+        alpha = 0.05
+        if rolling is None:
+            rolling2 = instant_acc
+        else:
+            rolling2 = (1.0 - alpha) * float(rolling) + alpha * instant_acc
+
+        # Weight multiplier used to adjust confidence (bounded)
+        weight = 0.75 + 0.5 * (rolling2 / 100.0)  # 0.75..1.25
+        weight = max(0.6, min(1.4, float(weight)))
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO calibration_stats (
+                asset, horizon_minutes, news_category, news_sentiment,
+                n_total, n_hit, rolling_accuracy, weight_multiplier, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                asset,
+                int(horizon),
+                category,
+                sentiment,
+                int(n_total2),
+                int(n_hit2),
+                float(round(rolling2, 3)),
+                float(round(weight, 4)),
+                self._utc_now_iso(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_calibration_weight(self, asset: str, horizon_minutes: int, news_category: str = None, news_sentiment: str = None) -> float:
+        """Return confidence weight multiplier for a signal segment."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT weight_multiplier
+                FROM calibration_stats
+                WHERE asset = ? AND horizon_minutes = ?
+                  AND COALESCE(news_category,'') = COALESCE(?, '')
+                  AND COALESCE(news_sentiment,'') = COALESCE(?, '')
+                """,
+                (asset, int(horizon_minutes), news_category, news_sentiment),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if not row or row[0] is None:
+                return 1.0
+            return float(row[0])
+        except Exception:
+            return 1.0
 
     def evaluate_due_forecasts_backfill(self, max_window_hours: int = 6, limit: int = 5000) -> Dict[str, Any]:
         """Evaluate all due forecasts (idempotent) and backfill late evaluations.
@@ -1279,6 +1695,24 @@ class Database:
 
                 snap = self.get_price_for_evaluation(asset, str(due_at), max_window_hours=max_window_hours)
                 if not snap or snap.get('price') is None:
+                    # If the forecast is long overdue and still not evaluable, mark expired.
+                    try:
+                        grace = max(24, int(max_window_hours) * 2)
+                        if due_at:
+                            dt = None
+                            s = str(due_at).replace('Z', '+00:00')
+                            try:
+                                dt = datetime.fromisoformat(s)
+                            except Exception:
+                                dt = None
+                            if dt is not None:
+                                now_utc = datetime.now(timezone.utc)
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                if (now_utc - dt) > timedelta(hours=grace):
+                                    self.expire_forecast(forecast_id, reason='missing_price')
+                    except Exception:
+                        pass
                     skipped += 1
                     continue
 
@@ -1305,6 +1739,20 @@ class Database:
                 abs_error = abs(actual_price - price0)
                 pct_error = (abs_error / price0) * 100.0
 
+                # Predicted-price errors if present
+                pred_price = f.get('predicted_price')
+                pred_abs_error = None
+                pred_pct_error = None
+                try:
+                    if pred_price is not None and str(pred_price) != '':
+                        pred_price_f = float(pred_price)
+                        if pred_price_f > 0:
+                            pred_abs_error = abs(actual_price - pred_price_f)
+                            pred_pct_error = (pred_abs_error / pred_price_f) * 100.0
+                except Exception:
+                    pred_abs_error = None
+                    pred_pct_error = None
+
                 eval_data = {
                     'evaluation_result': 'hit' if hit else 'miss',
                     'actual_direction': actual_direction,
@@ -1314,6 +1762,8 @@ class Database:
                     'direction_correct': hit,
                     'abs_error': abs_error,
                     'pct_error': pct_error,
+                    'pred_abs_error': pred_abs_error,
+                    'pred_pct_error': pred_pct_error,
                     'evaluation_quality': quality,
                     'actual_return': pct_move,
                     'evaluated_at': self._utc_now_iso(),
@@ -1920,6 +2370,8 @@ class Database:
             conditions.append("status = 'active'")
         elif status and status.lower() == "evaluated":
             conditions.append("status = 'evaluated'")
+        elif status and status.lower() == "expired":
+            conditions.append("status = 'expired'")
         # else: no status filter => show all
 
         if direction and direction != "All":
@@ -1957,6 +2409,7 @@ class Database:
                 SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+                    SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) as expired,
                     SUM(CASE WHEN status = 'evaluated' THEN 1 ELSE 0 END) as evaluated,
                     SUM(CASE WHEN evaluation_result = 'hit' THEN 1 ELSE 0 END) as hits,
                     SUM(CASE WHEN evaluation_result = 'miss' THEN 1 ELSE 0 END) as misses,

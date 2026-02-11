@@ -12,13 +12,17 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 def main():
-    db_path = r"d:\APP\gold ai\dahab_ai.db"
+    try:
+        import config
+        db_path = config.DATABASE_PATH
+    except Exception:
+        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'dahab_ai.db'))
     
     if not os.path.exists(db_path):
         print(f"❌ Database not found: {db_path}")
         return
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     cur = conn.cursor()
     
     print("="*80)

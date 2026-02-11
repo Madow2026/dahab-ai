@@ -5,6 +5,7 @@ Generates probabilistic forecasts from news analysis
 
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
+import json
 import config
 
 class Forecaster:
@@ -20,14 +21,36 @@ class Forecaster:
         affected_assets = analysis['affected_assets']
         
         for asset in affected_assets:
-            forecast = self._create_forecast(
-                news_item, analysis, asset, current_prices.get(asset, {})
-            )
-            forecasts.append(forecast)
+            price_data = current_prices.get(asset, {})
+
+            if getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', False):
+                for horizon_key, horizon_minutes in (config.RECOMMENDATION_HORIZONS or {}).items():
+                    forecast = self._create_forecast(
+                        news_item,
+                        analysis,
+                        asset,
+                        price_data,
+                        horizon_minutes=int(horizon_minutes),
+                        horizon_key=str(horizon_key),
+                    )
+                    forecasts.append(forecast)
+            else:
+                forecast = self._create_forecast(
+                    news_item, analysis, asset, price_data
+                )
+                forecasts.append(forecast)
         
         return forecasts
     
-    def _create_forecast(self, news_item: Dict, analysis: Dict, asset: str, price_data) -> Dict:
+    def _create_forecast(
+        self,
+        news_item: Dict,
+        analysis: Dict,
+        asset: str,
+        price_data,
+        horizon_minutes: int = None,
+        horizon_key: str = None,
+    ) -> Dict:
         """Create single forecast for asset"""
         category = analysis['category']
         sentiment = analysis['sentiment']
@@ -43,7 +66,8 @@ class Forecaster:
         confidence = self._cap_confidence_by_impact(confidence, impact_level)
         
         # Determine time horizon
-        horizon_minutes = config.FORECAST_HORIZONS.get(category, 240)
+        if horizon_minutes is None:
+            horizon_minutes = config.FORECAST_HORIZONS.get(category, 240)
         
         # Determine risk level
         risk_level = self._determine_risk_level(confidence, impact_level)
@@ -65,6 +89,27 @@ class Forecaster:
             current_price = price_data.get('price')
         else:
             current_price = price_data
+
+        predicted_price = None
+        try:
+            if current_price is not None and str(current_price) != '':
+                predicted_price = self._predict_price(
+                    float(current_price),
+                    direction=str(direction).upper(),
+                    confidence=float(confidence),
+                    horizon_minutes=int(horizon_minutes),
+                    asset=str(asset),
+                )
+        except Exception:
+            predicted_price = None
+
+        reasoning_tags = {
+            'category': category,
+            'sentiment': sentiment,
+            'impact_level': impact_level,
+            'asset': asset,
+            'horizon_key': horizon_key,
+        }
         
         return {
             'news_id': news_item.get('id'),
@@ -73,13 +118,57 @@ class Forecaster:
             'confidence': confidence,
             'risk_level': risk_level,
             'horizon_minutes': horizon_minutes,
+            'horizon_key': horizon_key,
             'created_at': created_at.isoformat(),
             'due_at': due_at.isoformat(),
             'reasoning': reasoning,
             'scenario_base': scenario_base,
             'scenario_alt': scenario_alt,
             'price_at_forecast': current_price
+            ,'predicted_price': predicted_price
+            ,'reasoning_tags': json.dumps(reasoning_tags, ensure_ascii=False)
+            ,'news_category': category
+            ,'news_sentiment': sentiment
+            ,'impact_level': impact_level
         }
+
+    def _predict_price(self, current_price: float, direction: str, confidence: float, horizon_minutes: int, asset: str) -> float:
+        """Simple, deterministic price projection for storage + later evaluation.
+
+        This is intentionally conservative and purely statistical (no retraining).
+        """
+        if current_price <= 0:
+            return current_price
+
+        asset_key = (asset or '').strip()
+        # Rough daily move scale (percent). Keeps projections realistic.
+        daily_move_pct = {
+            'USD Index': 0.4,
+            'Gold': 1.0,
+            'Silver': 1.4,
+            'Oil': 2.0,
+            'Bitcoin': 4.5,
+        }.get(asset_key, 1.0)
+
+        days = max(float(horizon_minutes) / (60.0 * 24.0), 1.0 / (60.0 * 24.0))
+        # Scale with sqrt(time) so 7d isn't 7x 1d.
+        scaled_move = daily_move_pct * (days ** 0.5)
+
+        sign = 0.0
+        d = (direction or '').upper()
+        if d == 'UP':
+            sign = 1.0
+        elif d == 'DOWN':
+            sign = -1.0
+        else:
+            sign = 0.0
+
+        conf_scale = max(0.0, min(float(confidence) / 100.0, 1.0))
+        expected_pct = sign * scaled_move * (0.35 + 0.65 * conf_scale)
+
+        projected = current_price * (1.0 + expected_pct / 100.0)
+        # Round for stable display/storage.
+        return round(projected, 4)
 
     def _cap_confidence_by_impact(self, confidence: float, impact_level: str) -> float:
         """Apply impact-based confidence caps.

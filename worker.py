@@ -13,6 +13,7 @@ import argparse
 import os
 import socket
 import threading
+import hashlib
 
 
 class _SingleInstanceLock:
@@ -387,6 +388,31 @@ class WorkerProcess:
                         impact.get('affected_assets')
                     )
 
+                    # Importance classification for event-driven recommendations
+                    try:
+                        conf = float(impact.get('confidence', 0.0) or 0.0)
+                        lvl = str(impact.get('impact_level') or 'LOW').upper()
+                        mult = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}.get(lvl, 1.0)
+                        src_rel = float(news.get('source_reliability', 0.8) or 0.8)
+                        importance_score = conf * mult + (src_rel * 10.0)
+                        if importance_score >= 75:
+                            importance_level = 'HIGH'
+                        elif importance_score >= 55:
+                            importance_level = 'MEDIUM'
+                        else:
+                            importance_level = 'LOW'
+
+                        self.db.update_news_importance(news_id, importance_score, importance_level)
+
+                        if conf >= float(getattr(config, 'RECOMMENDATION_IMPACT_THRESHOLD', 55.0)):
+                            self.db.log(
+                                'INFO',
+                                'Recommender',
+                                f"High-impact event: news_id={news_id} score={importance_score:.1f} conf={conf:.1f} level={importance_level} category={impact.get('category')} sentiment={impact.get('sentiment')}",
+                            )
+                    except Exception:
+                        pass
+
                     analyzed_count += 1
                     
                 except Exception as e:
@@ -532,6 +558,27 @@ class WorkerProcess:
 
                     inserted_any = False
                     for forecast in forecasts or []:
+                        try:
+                            # Stable group id ties horizons together for the same (news, asset)
+                            if not forecast.get('recommendation_group_id'):
+                                seed = f"{news_item.get('id')}|{forecast.get('asset')}|{news_item.get('fetched_at') or news_item.get('published_at') or ''}"
+                                forecast['recommendation_group_id'] = hashlib.sha1(seed.encode('utf-8')).hexdigest()[:16]
+
+                            # Apply rolling calibration (asset + horizon + news type)
+                            weight = self.db.get_calibration_weight(
+                                str(forecast.get('asset')),
+                                int(forecast.get('horizon_minutes') or 0),
+                                news_category=forecast.get('news_category') or analysis.get('category'),
+                                news_sentiment=forecast.get('news_sentiment') or analysis.get('sentiment'),
+                            )
+                            conf = float(forecast.get('confidence') or 0.0)
+                            conf = conf * float(weight or 1.0)
+                            # Keep within global bounds (forecaster already caps by impact)
+                            conf = max(config.MIN_CONFIDENCE_ALLOWED, min(conf, config.MAX_CONFIDENCE_ALLOWED))
+                            forecast['confidence'] = round(conf, 1)
+                        except Exception:
+                            pass
+
                         self.db.insert_forecast(forecast)
                         forecast_count += 1
                         inserted_any = True

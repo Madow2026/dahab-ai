@@ -9,14 +9,24 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import os
 
+import config
+
 class DatabaseManager:
-    def __init__(self, db_path: str = "dahab_ai.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = os.path.abspath(db_path or config.DATABASE_PATH)
         self.init_database()
     
     def get_connection(self):
         """Get database connection"""
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 5000")
+        except Exception:
+            pass
+        return conn
     
     def init_database(self):
         """Initialize database schema"""
