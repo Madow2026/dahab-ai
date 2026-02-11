@@ -95,6 +95,10 @@ def _fmt_horizon_label(forecast: dict) -> str:
     if hk:
         return hk
     hm = int(_safe_float(forecast.get("horizon_minutes"), 0))
+    if hm == 15:
+        return "15m"
+    if hm == 60:
+        return "60m"
     if hm == 720:
         return "12h"
     if hm == 1440:
@@ -134,6 +138,41 @@ def _fmt_dt_short(dt: datetime | None) -> str:
         return dt.strftime('%Y-%m-%d %H:%M')
     except Exception:
         return str(dt)
+
+
+def _project_predicted_price(price0: float, direction: str, confidence_pct: float, horizon_minutes: int) -> float:
+    if price0 is None:
+        return math.nan
+    try:
+        price0 = float(price0)
+    except Exception:
+        return math.nan
+    if price0 <= 0:
+        return math.nan
+
+    # Conservative horizon scaling. This is a display fallback when DB doesn't have predicted_price.
+    base_by_horizon = {
+        15: 0.0010,
+        60: 0.0025,
+        360: 0.0080,
+        720: 0.0100,
+        2160: 0.0220,
+        2880: 0.0260,
+        4320: 0.0300,
+    }
+    base = float(base_by_horizon.get(int(horizon_minutes or 0), 0.0040))
+    conf = max(0.0, min(float(confidence_pct or 0.0) / 100.0, 1.0))
+    pct = base * max(0.10, min(1.0, conf))
+
+    d = str(direction or "").upper()
+    if d == "UP":
+        pct = abs(pct)
+    elif d == "DOWN":
+        pct = -abs(pct)
+    else:
+        pct = 0.0
+
+    return round(price0 * (1.0 + pct), 4)
 
 @st.cache_data(ttl=15)  # Cache for 15 seconds only
 def fetch_market_data():
@@ -380,6 +419,19 @@ try:
         for h in wanted:
             f = buckets.get(h)
             if not f:
+                rows.append(
+                    {
+                        "Created": "—",
+                        "Due": "—",
+                        "Horizon": h,
+                        "Direction": "—",
+                        "Conf%": "—",
+                        "Predicted": "—",
+                        "Actual": "—",
+                        "% Error": "—",
+                        "Status": "no forecast yet",
+                    }
+                )
                 continue
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
             due_dt = _parse_dt(f.get("due_at"))
@@ -396,6 +448,18 @@ try:
             predicted_f = None
             if predicted is not None and str(predicted) != "":
                 predicted_f = _safe_float(predicted, default=math.nan)
+
+            if predicted_f is None or math.isnan(predicted_f):
+                price0 = f.get("price_at_forecast")
+                hm = int(_safe_float(f.get("horizon_minutes"), 0))
+                proj = _project_predicted_price(
+                    price0,
+                    direction=direction,
+                    confidence_pct=_safe_float(f.get("confidence"), 0.0),
+                    horizon_minutes=hm,
+                )
+                if not math.isnan(proj):
+                    predicted_f = proj
 
             actual = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
             actual_f = None

@@ -241,10 +241,26 @@ class StreamlitWorker:
     def _generate_forecasts(self):
         """Generate forecasts from recent news"""
         try:
-            # Get recent unprocessed news
-            recent_news = self.db.get_unprocessed_news(limit=10)
+            # Primary: unprocessed news
+            recent_news = self.db.get_unprocessed_news(limit=10) or []
 
-            if not recent_news:
+            # Backfill mode: also consider recent news to fill missing horizons
+            try:
+                backfill_news = self.db.get_recent_news(limit=20) or []
+            except Exception:
+                backfill_news = []
+
+            # Deduplicate by id while preserving unprocessed priority
+            by_id = {}
+            for n in recent_news:
+                if n and n.get('id') is not None:
+                    by_id[n['id']] = n
+            for n in backfill_news:
+                if n and n.get('id') is not None and n['id'] not in by_id:
+                    by_id[n['id']] = n
+
+            news_batch = list(by_id.values())
+            if not news_batch:
                 return
 
             # Best-effort current prices (cached or last known from DB)
@@ -274,7 +290,32 @@ class StreamlitWorker:
             except Exception:
                 current_prices = {}
 
-            for news_item in recent_news:
+            # Read existing forecasts per news_id once (to avoid duplicates)
+            def _existing_keys_for_news(news_id: int):
+                try:
+                    conn = self.db.get_connection()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT asset, COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0) FROM forecasts WHERE news_id = ?",
+                        (news_id,),
+                    )
+                    rows = cur.fetchall()
+                    conn.close()
+                    keys = set()
+                    for r in rows or []:
+                        asset = (r[0] or '').strip()
+                        hk = (r[1] or '').strip()
+                        hm = int(r[2] or 0)
+                        keys.add((asset, hk if hk else str(hm)))
+                    return keys
+                except Exception:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    return set()
+
+            for news_item in news_batch:
                 inserted = 0
                 try:
                     # Build analysis from stored fields
@@ -293,10 +334,21 @@ class StreamlitWorker:
                     }
 
                     forecasts = self.forecaster.generate_forecasts(news_item, analysis, current_prices)
+
+                    existing = _existing_keys_for_news(int(news_item.get('id') or 0))
                     for forecast in forecasts or []:
                         try:
+                            # Skip if this horizon already exists for this news+asset
+                            asset = str(forecast.get('asset') or '').strip()
+                            hk = str(forecast.get('horizon_key') or '').strip()
+                            hm = str(int(forecast.get('horizon_minutes') or 0))
+                            k = (asset, hk if hk else hm)
+                            if k in existing:
+                                continue
+
                             self.db.insert_forecast(forecast)
                             inserted += 1
+                            existing.add(k)
                         except Exception as e:
                             print(f"Error inserting forecast: {e}")
                             continue
@@ -312,11 +364,12 @@ class StreamlitWorker:
                 except Exception as e:
                     print(f"Error generating forecasts: {e}")
                 finally:
-                    # Mark news processed to prevent infinite reprocessing loops
-                    try:
-                        self.db.mark_news_processed(news_item['id'])
-                    except Exception:
-                        pass
+                    # Mark news processed only if it was originally unprocessed.
+                    if news_item.get('id') in [n.get('id') for n in recent_news]:
+                        try:
+                            self.db.mark_news_processed(news_item['id'])
+                        except Exception:
+                            pass
                     
         except Exception as e:
             print(f"Forecast generation error: {e}")
