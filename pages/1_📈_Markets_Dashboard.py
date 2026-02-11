@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import sys
 import os
 import time
+import math
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -78,6 +79,55 @@ except Exception:
     pass
 
 render_sidebar(db, current_page_key=PAGE_KEY)
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or str(value) == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _fmt_horizon_label(forecast: dict) -> str:
+    hk = str(forecast.get("horizon_key") or "").strip()
+    if hk:
+        return hk
+    hm = int(_safe_float(forecast.get("horizon_minutes"), 0))
+    if hm == 720:
+        return "12h"
+    if hm == 1440:
+        return "24h"
+    if hm == 4320:
+        return "72h"
+    if hm == 5760:
+        return "96h"
+    if hm >= 1440 and hm % 1440 == 0:
+        return f"{hm // 1440}d"
+    if hm >= 60 and hm % 60 == 0:
+        return f"{hm // 60}h"
+    if hm > 0:
+        return f"{hm}m"
+    return "—"
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _fmt_dt_short(dt: datetime | None) -> str:
+    if not dt:
+        return "—"
+    try:
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return str(dt)
 
 @st.cache_data(ttl=15)  # Cache for 15 seconds only
 def fetch_market_data():
@@ -293,6 +343,89 @@ try:
     
     st.markdown("---")
     
+    # High-impact alerts
+    st.subheader("🎯 Latest Gold Forecasts (Multi‑Horizon)")
+    try:
+        gold_forecasts = db.get_all_forecasts_history(limit=200, asset="Gold")
+    except Exception:
+        gold_forecasts = []
+
+    if not gold_forecasts:
+        st.info("No Gold forecasts found yet. The worker may still be generating multi-horizon forecasts.")
+    else:
+        rows = []
+        # Sort: newest first (already), then prefer showing the 4 target horizons when present
+        preferred = {"12h": 0, "24h": 1, "72h": 2, "96h": 3}
+        gold_forecasts_sorted = sorted(
+            gold_forecasts,
+            key=lambda f: (
+                _parse_dt(f.get("created_at") or f.get("forecast_time") or f.get("due_at")) or datetime.min,
+                -preferred.get(_fmt_horizon_label(f), 99),
+            ),
+            reverse=True,
+        )
+
+        for f in gold_forecasts_sorted[:25]:
+            created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
+            due_dt = _parse_dt(f.get("due_at"))
+
+            direction = str(f.get("direction") or "").upper() or "—"
+            status = str(f.get("status") or "").lower() or "—"
+            eval_result = str(f.get("evaluation_result") or "").lower()
+            if status == "evaluated" and eval_result:
+                status_disp = f"evaluated/{eval_result}"
+            else:
+                status_disp = status
+
+            predicted = f.get("predicted_price")
+            predicted_f = None
+            if predicted is not None and str(predicted) != "":
+                predicted_f = _safe_float(predicted, default=math.nan)
+
+            actual = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
+            actual_f = None
+            if actual is not None and str(actual) != "":
+                actual_f = _safe_float(actual, default=math.nan)
+
+            abs_err = f.get("pred_abs_error")
+            pct_err = f.get("pred_pct_error")
+            abs_err_f = None
+            pct_err_f = None
+            if abs_err is not None and str(abs_err) != "":
+                abs_err_f = _safe_float(abs_err, default=math.nan)
+            if pct_err is not None and str(pct_err) != "":
+                pct_err_f = _safe_float(pct_err, default=math.nan)
+
+            # Compute on-the-fly if not stored
+            if (
+                (abs_err_f is None or math.isnan(abs_err_f))
+                and (pct_err_f is None or math.isnan(pct_err_f))
+                and predicted_f is not None
+                and not math.isnan(predicted_f)
+                and actual_f is not None
+                and not math.isnan(actual_f)
+            ):
+                abs_err_f = abs(actual_f - predicted_f)
+                pct_err_f = (abs_err_f / abs(predicted_f) * 100.0) if predicted_f else math.nan
+
+            rows.append(
+                {
+                    "Created": _fmt_dt_short(created_dt),
+                    "Due": _fmt_dt_short(due_dt),
+                    "Horizon": _fmt_horizon_label(f),
+                    "Direction": direction,
+                    "Conf%": f"{_safe_float(f.get('confidence'), 0.0):.0f}",
+                    "Predicted": "—" if predicted_f is None or math.isnan(predicted_f) else f"{predicted_f:,.2f}",
+                    "Actual": "—" if actual_f is None or math.isnan(actual_f) else f"{actual_f:,.2f}",
+                    "% Error": "—" if pct_err_f is None or math.isnan(pct_err_f) else f"{pct_err_f:.2f}%",
+                    "Status": status_disp,
+                }
+            )
+
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
     # High-impact alerts
     st.subheader("⚠️ Recent High-Impact News")
     
