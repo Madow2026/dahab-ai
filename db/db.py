@@ -2426,6 +2426,7 @@ class Database:
                     SUM(CASE WHEN evaluation_result = 'hit' THEN 1 ELSE 0 END) as hits,
                     SUM(CASE WHEN evaluation_result = 'miss' THEN 1 ELSE 0 END) as misses,
                     AVG(confidence) as avg_confidence,
+                    AVG(CASE WHEN status = 'evaluated' THEN confidence ELSE NULL END) as avg_confidence_evaluated,
                     MIN(datetime(COALESCE(created_at, due_at))) as first_forecast,
                     MAX(datetime(COALESCE(created_at, due_at))) as last_forecast
                 FROM forecasts

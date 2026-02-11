@@ -429,11 +429,28 @@ else:
     # Create comparison chart
     fig = go.Figure()
     
-    # Expected line (perfect calibration)
-    confidence_midpoints = [20, 45, 55, 65, 75, 90]
+    # Expected line (perfect calibration) — match present bins exactly
+    midpoint_map = {
+        '0-40%': 20,
+        '40-50%': 45,
+        '50-60%': 55,
+        '60-70%': 65,
+        '70-80%': 75,
+        '80-100%': 90,
+    }
+    expected = [midpoint_map.get(str(x), None) for x in calibration['confidence_range']]
+
+    # Marker sizes reflect sample sizes (tiny bins are noisy)
+    sizes = []
+    for c in calibration['count']:
+        try:
+            n = int(c)
+        except Exception:
+            n = 0
+        sizes.append(max(8, min(18, 6 + n)))
     fig.add_trace(go.Scatter(
         x=calibration['confidence_range'],
-        y=confidence_midpoints,
+        y=expected,
         mode='lines',
         name='Perfect Calibration',
         line=dict(color='gray', dash='dash')
@@ -446,7 +463,7 @@ else:
         mode='lines+markers',
         name='Actual Accuracy',
         line=dict(color='#D4AF37', width=3),
-        marker=dict(size=10)
+        marker=dict(size=sizes)
     ))
     
     fig.update_layout(

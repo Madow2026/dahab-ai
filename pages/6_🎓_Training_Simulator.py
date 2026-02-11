@@ -757,7 +757,7 @@ def render_ai_recommendations(session_id: int, current_prices: Dict[str, float])
         
         with col2:
             st.metric(
-                "✅ Accuracy Rate",
+                "✅ Simulator Accuracy Rate",
                 f"{stats['accuracy_rate']:.1f}%",
                 delta=f"{stats['accurate_count']} correct"
             )
@@ -771,7 +771,7 @@ def render_ai_recommendations(session_id: int, current_prices: Dict[str, float])
         
         with col4:
             st.metric(
-                "💪 Avg Confidence",
+                "💪 Simulator Avg Confidence",
                 f"{stats['avg_confidence']:.1f}%",
                 help="Average AI confidence in recommendations"
             )

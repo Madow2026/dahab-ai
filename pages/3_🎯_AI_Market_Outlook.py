@@ -402,8 +402,10 @@ with col_s4:
     acc = (hits / total_eval * 100) if total_eval > 0 else 0
     st.metric("Overall Accuracy", f"{acc:.1f}%", f"{hits}/{total_eval}")
 with col_s5:
-    avg_conf = summary_stats.get('avg_confidence', 0) or 0
-    st.metric("Avg Confidence", f"{avg_conf:.1f}%")
+    avg_conf = summary_stats.get('avg_confidence_evaluated')
+    if avg_conf is None or str(avg_conf) == "":
+        avg_conf = summary_stats.get('avg_confidence', 0) or 0
+    st.metric("Avg Confidence", f"{float(avg_conf or 0):.1f}%")
 
 # Worker status indicator
 worker_alive = db.is_worker_alive(max_stale_seconds=120)
@@ -472,8 +474,13 @@ else:
         st.metric("▼ Bearish", down_count)
     
     with col3:
-        avg_confidence = sum(f.get('confidence', 0) for f in forecasts) / len(forecasts)
-        st.metric("Avg Confidence", f"{avg_confidence:.1f}%")
+        evaluated_in_view = [f for f in forecasts if f.get('status') == 'evaluated']
+        if evaluated_in_view:
+            avg_confidence = sum(float(f.get('confidence') or 0) for f in evaluated_in_view) / len(evaluated_in_view)
+            st.metric("Avg Confidence (evaluated)", f"{avg_confidence:.1f}%")
+        else:
+            avg_confidence = sum(float(f.get('confidence') or 0) for f in forecasts) / len(forecasts)
+            st.metric("Avg Confidence", f"{avg_confidence:.1f}%")
 
     with col4:
         evaluated_in_view = [f for f in forecasts if f.get('status') == 'evaluated']

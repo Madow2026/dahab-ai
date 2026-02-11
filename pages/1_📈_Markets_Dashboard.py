@@ -533,7 +533,10 @@ try:
     
     # Get stats from database
     all_forecasts = db.get_active_forecasts(limit=1000)
-    accuracy_stats = db.get_forecast_accuracy()
+    try:
+        summary_stats = db.get_forecasts_summary_stats() or {}
+    except Exception:
+        summary_stats = {}
     portfolio = db.get_portfolio()
     
     with col1:
@@ -545,15 +548,18 @@ try:
         st.metric("Active Forecasts", active_forecasts)
     
     with col3:
-        total_evaluated = sum(stat['total'] for stat in accuracy_stats.values())
+        total_evaluated = int(summary_stats.get('evaluated') or 0)
         st.metric("Evaluated Forecasts", total_evaluated)
     
     with col4:
-        if accuracy_stats:
-            avg_accuracy = sum(stat['accuracy'] for stat in accuracy_stats.values()) / len(accuracy_stats)
-            st.metric("Avg Accuracy", f"{avg_accuracy:.1f}%")
+        hits = float(summary_stats.get('hits') or 0)
+        misses = float(summary_stats.get('misses') or 0)
+        total_eval = hits + misses
+        if total_eval > 0:
+            acc = (hits / total_eval) * 100.0
+            st.metric("Overall Accuracy", f"{acc:.1f}%", f"{int(hits)}/{int(total_eval)}")
         else:
-            st.metric("Avg Accuracy", "N/A")
+            st.metric("Overall Accuracy", "N/A")
     
     st.markdown("---")
     
