@@ -6,7 +6,7 @@ AUTO-REFRESHING - Read-only display
 
 import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import sys
 import os
 import time
@@ -460,6 +460,13 @@ try:
                 continue
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
             due_dt = _parse_dt(f.get("due_at"))
+            if due_dt is None and created_dt is not None:
+                try:
+                    hm = int(_safe_float(f.get("horizon_minutes"), 0))
+                    if hm > 0:
+                        due_dt = created_dt + timedelta(minutes=hm)
+                except Exception:
+                    pass
 
             direction = str(f.get("direction") or "").upper() or "—"
             status = str(f.get("status") or "").lower() or "—"
