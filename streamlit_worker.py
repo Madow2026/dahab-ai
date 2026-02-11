@@ -288,10 +288,24 @@ class StreamlitWorker:
                     if price_data and price_data.get('price') is not None:
                         expected = [(str(k), int(v)) for k, v in (config.RECOMMENDATION_HORIZONS or {}).items()]
 
-                        # Create at most one new baseline per horizon within a recency window.
-                        # This keeps forecasts updating (auto-correction) without flooding the DB.
-                        recency_minutes_default = 30
+                        # Create recurring baselines per horizon.
+                        # Rule:
+                        # - If no forecast exists for a horizon => create one
+                        # - If the latest forecast is due (due_at <= now) => create a new one (restart that horizon)
+                        # - Cooldown prevents duplicates across fast worker cycles
                         dt_expr = "datetime(replace(substr(COALESCE(created_at, due_at),1,19),'T',' '))"
+
+                        def _parse_iso_dt(value):
+                            if not value:
+                                return None
+                            try:
+                                s = str(value).strip().replace('Z', '+00:00')
+                                dt = datetime.fromisoformat(s)
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                return dt
+                            except Exception:
+                                return None
 
                         conn = self.db.get_connection()
                         cur = conn.cursor()
@@ -299,24 +313,47 @@ class StreamlitWorker:
 
                         for hk, hm in expected:
                             try:
-                                # Horizon-specific cadence: longer horizons can update less frequently.
-                                cadence = max(30, min(240, int(hm // 6)))  # 30m..4h
-                                cadence = int(cadence or recency_minutes_default)
+                                # Cooldown: short horizons can restart quickly; long ones slower.
+                                if int(hm) <= 60:
+                                    cooldown_min = 2
+                                elif int(hm) <= 12 * 60:
+                                    cooldown_min = 10
+                                else:
+                                    cooldown_min = 30
 
+                                # Look at the latest forecast for this horizon.
                                 cur.execute(
                                     f"""
-                                    SELECT 1
+                                    SELECT created_at, due_at, status
                                     FROM forecasts
                                     WHERE asset = ?
                                       AND (COALESCE(horizon_key,'') = ? OR COALESCE(horizon_minutes,0) = ?)
-                                      AND {dt_expr} >= datetime('now', '-' || ? || ' minutes')
+                                    ORDER BY {dt_expr} DESC, id DESC
                                     LIMIT 1
                                     """,
-                                    (asset, hk, int(hm), int(cadence)),
+                                    (asset, hk, int(hm)),
                                 )
-                                exists_recent = cur.fetchone() is not None
-                                if exists_recent:
-                                    continue
+                                row = cur.fetchone()
+                                now_dt = datetime.now(timezone.utc)
+
+                                if row:
+                                    created_dt = _parse_iso_dt(row[0])
+                                    due_dt = _parse_iso_dt(row[1])
+                                    status = str(row[2] or '').lower()
+
+                                    # If we are still before due time, we keep the current cycle running.
+                                    if due_dt is not None and due_dt > now_dt:
+                                        continue
+
+                                    # If due time passed but we just created something recently, avoid duplicates.
+                                    if created_dt is not None:
+                                        age_sec = (now_dt - created_dt).total_seconds()
+                                        if age_sec < float(cooldown_min) * 60.0:
+                                            continue
+
+                                    # If due is missing (shouldn't happen), still allow periodic refresh.
+                                    # Also if it's evaluated/expired/active-but-due, we restart.
+                                    _ = status  # (kept for readability)
 
                                 synthetic_news = {
                                     'id': None,
@@ -349,7 +386,8 @@ class StreamlitWorker:
                                                 tags = json.loads(rt) if isinstance(rt, str) else (rt or {})
                                             if isinstance(tags, dict):
                                                 tags['baseline'] = True
-                                                tags['baseline_cadence_min'] = int(cadence)
+                                                tags['baseline_restart'] = True
+                                                tags['baseline_cooldown_min'] = int(cooldown_min)
                                                 f['reasoning_tags'] = json.dumps(tags, ensure_ascii=False)
                                         except Exception:
                                             pass
@@ -369,7 +407,7 @@ class StreamlitWorker:
                             pass
 
                         if inserted:
-                            print(f"🟡 Baseline: inserted {inserted} Gold forecasts across horizons")
+                            print(f"🟡 Baseline: inserted {inserted} recurring Gold forecasts")
             except Exception:
                 pass
 
