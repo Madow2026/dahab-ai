@@ -175,6 +175,26 @@ def _project_predicted_price(price0: float, direction: str, confidence_pct: floa
 
     return round(price0 * (1.0 + pct), 4)
 
+
+def _horizon_to_minutes(label: str) -> int:
+    s = str(label or '').strip().lower()
+    if s.endswith('m'):
+        try:
+            return int(s[:-1])
+        except Exception:
+            return 0
+    if s.endswith('h'):
+        try:
+            return int(s[:-1]) * 60
+        except Exception:
+            return 0
+    if s.endswith('d'):
+        try:
+            return int(s[:-1]) * 24 * 60
+        except Exception:
+            return 0
+    return 0
+
 @st.cache_data(ttl=15)  # Cache for 15 seconds only
 def fetch_market_data():
     """Fetch latest prices from database with timestamps"""
@@ -392,7 +412,9 @@ try:
     # High-impact alerts
     st.subheader("🎯 Latest Gold Forecasts (Multi‑Horizon)")
     try:
-        gold_forecasts = db.get_all_forecasts_history(limit=200, asset="Gold")
+        # Use a larger window so we can show the forecast closest to its due time
+        # (prevents Due In from jumping up when newer forecasts are inserted).
+        gold_forecasts = db.get_all_forecasts_history(limit=3000, asset="Gold", days=7)
     except Exception:
         gold_forecasts = []
 
@@ -400,23 +422,7 @@ try:
         st.info("No Gold forecasts found yet. The worker may still be generating multi-horizon forecasts.")
     else:
         rows = []
-        # Deduplicate: show latest forecast per horizon
         wanted = ["15m", "60m", "6h", "12h", "36h", "48h", "72h"]
-        buckets = {k: None for k in wanted}
-
-        gold_forecasts_sorted = sorted(
-            gold_forecasts,
-            key=lambda f: _parse_dt(f.get("created_at") or f.get("forecast_time") or f.get("due_at")) or datetime.min,
-            reverse=True,
-        )
-
-        for f in gold_forecasts_sorted:
-            h = _fmt_horizon_label(f)
-            if h in buckets and buckets[h] is None:
-                buckets[h] = f
-            if all(buckets.values()):
-                break
-
         now_utc = datetime.utcnow()
 
         def _due_in_text(due_dt: datetime | None) -> str:
@@ -440,8 +446,50 @@ try:
             except Exception:
                 return '—'
 
+        def _as_naive_utc(dt: datetime | None) -> datetime | None:
+            if not dt:
+                return None
+            try:
+                if getattr(dt, 'tzinfo', None) is not None:
+                    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except Exception:
+                return dt
+
+        def _compute_due_dt(f: dict) -> datetime | None:
+            created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
+            due_dt = _parse_dt(f.get("due_at"))
+            if due_dt is None and created_dt is not None:
+                try:
+                    hm = int(_safe_float(f.get("horizon_minutes"), 0))
+                    if hm > 0:
+                        due_dt = created_dt + timedelta(minutes=hm)
+                except Exception:
+                    pass
+            return due_dt
+
+        def _pick_display_forecast(h_label: str) -> dict | None:
+            # Pick the forecast whose due time is closest to now.
+            # This keeps Due In counting down and lets Actual appear right after evaluation.
+            best = None
+            best_key = None
+            for f in gold_forecasts:
+                if _fmt_horizon_label(f) != h_label:
+                    continue
+                due_dt = _as_naive_utc(_compute_due_dt(f))
+                if not due_dt:
+                    continue
+                delta = abs((due_dt - now_utc).total_seconds())
+                has_actual = (f.get('actual_price') is not None) or (f.get('price_at_evaluation') is not None) or (f.get('realized_price') is not None)
+                # Prefer rows with actual when available, then closest due-time.
+                key = (0 if has_actual else 1, delta, -_safe_float(f.get('id'), 0.0))
+                if best_key is None or key < best_key:
+                    best = f
+                    best_key = key
+            return best
+
         for h in wanted:
-            f = buckets.get(h)
+            f = _pick_display_forecast(h)
             if not f:
                 rows.append(
                     {
@@ -459,14 +507,7 @@ try:
                 )
                 continue
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
-            due_dt = _parse_dt(f.get("due_at"))
-            if due_dt is None and created_dt is not None:
-                try:
-                    hm = int(_safe_float(f.get("horizon_minutes"), 0))
-                    if hm > 0:
-                        due_dt = created_dt + timedelta(minutes=hm)
-                except Exception:
-                    pass
+            due_dt = _compute_due_dt(f)
 
             direction = str(f.get("direction") or "").upper() or "—"
             status = str(f.get("status") or "").lower() or "—"
@@ -540,6 +581,8 @@ try:
         st.subheader("📉 Gold Forecast vs Actual (Trend)")
         wanted = ["15m", "60m", "6h", "12h", "36h", "48h", "72h"]
         selected_h = st.selectbox("Horizon", wanted, index=1)
+        window_minutes = _horizon_to_minutes(selected_h)
+        window_start = now_utc - timedelta(minutes=window_minutes) if window_minutes else None
 
         try:
             hist = db.get_all_forecasts_history(limit=2000, asset="Gold", days=30) or []
@@ -553,6 +596,15 @@ try:
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
             if not created_dt:
                 continue
+            if window_start is not None:
+                try:
+                    cd = created_dt
+                    if getattr(cd, 'tzinfo', None) is not None:
+                        cd = cd.astimezone(timezone.utc).replace(tzinfo=None)
+                    if cd < window_start:
+                        continue
+                except Exception:
+                    pass
 
             direction = str(f.get("direction") or "").upper()
             predicted = f.get("predicted_price")
@@ -613,6 +665,8 @@ try:
                 yaxis_title="Gold Price",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             )
+            if window_start is not None:
+                fig2.update_xaxes(range=[window_start, now_utc])
             st.plotly_chart(fig2, use_container_width=True)
 
     st.markdown("---")
