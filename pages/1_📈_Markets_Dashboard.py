@@ -583,6 +583,7 @@ try:
         selected_h = st.selectbox("Horizon", wanted, index=1)
         window_minutes = _horizon_to_minutes(selected_h)
         window_start = now_utc - timedelta(minutes=window_minutes) if window_minutes else None
+        window_end = now_utc + timedelta(minutes=window_minutes) if window_minutes else None
 
         try:
             hist = db.get_all_forecasts_history(limit=2000, asset="Gold", days=30) or []
@@ -638,7 +639,7 @@ try:
             if actual is not None and str(actual) != "":
                 actual_f = _safe_float(actual, default=math.nan)
 
-            due_dt = _to_naive_utc(_parse_dt(f.get("due_at")))
+            due_dt = _to_naive_utc(_compute_due_dt(f))
             eval_dt = _to_naive_utc(_parse_dt(f.get("evaluated_at")))
             actual_x = eval_dt or due_dt
 
@@ -681,7 +682,7 @@ try:
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             )
             if window_start is not None:
-                fig2.update_xaxes(range=[window_start, now_utc])
+                fig2.update_xaxes(range=[window_start, window_end or now_utc])
             st.plotly_chart(fig2, use_container_width=True)
 
     st.markdown("---")
