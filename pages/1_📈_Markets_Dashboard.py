@@ -586,6 +586,8 @@ try:
     snapshot = []
     try:
         hist_snap = db.get_all_forecasts_history(limit=2000, asset="Gold", days=7) or []
+        # Prefer a row that has an actual value (evaluated) for each horizon.
+        # Otherwise fall back to the latest row (likely active).
         latest_by_h = {}
         for f in hist_snap:
             hlabel = _fmt_horizon_label(f)
@@ -602,21 +604,50 @@ try:
                     confidence_pct=_safe_float(f.get("confidence"), 0.0),
                     horizon_minutes=_safe_float(f.get("horizon_minutes"), 0),
                 )
-            act = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
+            act_raw = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
+            act_val = _safe_float(act_raw, default=math.nan)
+            has_actual = not math.isnan(act_val)
 
             rec = latest_by_h.get(hlabel)
-            if rec is None or created_dt > rec["created"]:
+            if rec is None:
                 latest_by_h[hlabel] = {
                     "created": created_dt,
+                    "has_actual": has_actual,
                     "h": hlabel,
                     "pred": _safe_float(pred, default=math.nan),
-                    "act": _safe_float(act, default=math.nan),
+                    "act": act_val,
+                }
+                continue
+
+            # Selection rules:
+            # 1) Prefer rows with actual values.
+            # 2) Within the same actual-availability class, prefer the newest.
+            if has_actual and not rec.get("has_actual"):
+                latest_by_h[hlabel] = {
+                    "created": created_dt,
+                    "has_actual": True,
+                    "h": hlabel,
+                    "pred": _safe_float(pred, default=math.nan),
+                    "act": act_val,
+                }
+            elif has_actual == bool(rec.get("has_actual")) and created_dt > rec["created"]:
+                latest_by_h[hlabel] = {
+                    "created": created_dt,
+                    "has_actual": bool(rec.get("has_actual")),
+                    "h": hlabel,
+                    "pred": _safe_float(pred, default=math.nan),
+                    "act": act_val,
                 }
 
         for h in (list((getattr(config, 'RECOMMENDATION_HORIZONS', {}) or {}).keys()) or ["15m","60m","6h","12h","48h","72h"]):
             rec = latest_by_h.get(h)
             if rec:
-                snapshot.append(rec)
+                snapshot.append({
+                    "created": rec.get("created"),
+                    "h": rec.get("h"),
+                    "pred": rec.get("pred"),
+                    "act": rec.get("act"),
+                })
     except Exception:
         snapshot = []
 
