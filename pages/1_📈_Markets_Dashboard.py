@@ -590,17 +590,27 @@ try:
             hist = gold_forecasts or []
 
         series = []
+
+        def _to_naive_utc(dt: datetime | None) -> datetime | None:
+            if not dt:
+                return None
+            try:
+                if getattr(dt, 'tzinfo', None) is not None:
+                    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except Exception:
+                return dt
+
         for f in hist:
             if _fmt_horizon_label(f) != selected_h:
                 continue
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
             if not created_dt:
                 continue
+            created_dt = _to_naive_utc(created_dt)
             if window_start is not None:
                 try:
                     cd = created_dt
-                    if getattr(cd, 'tzinfo', None) is not None:
-                        cd = cd.astimezone(timezone.utc).replace(tzinfo=None)
                     if cd < window_start:
                         continue
                 except Exception:
@@ -628,13 +638,18 @@ try:
             if actual is not None and str(actual) != "":
                 actual_f = _safe_float(actual, default=math.nan)
 
-            due_dt = _parse_dt(f.get("due_at"))
-            eval_dt = _parse_dt(f.get("evaluated_at"))
+            due_dt = _to_naive_utc(_parse_dt(f.get("due_at")))
+            eval_dt = _to_naive_utc(_parse_dt(f.get("evaluated_at")))
             actual_x = eval_dt or due_dt
+
+            # Use due time as the common x-axis for both series.
+            # This makes comparison readable (forecast is for the horizon endpoint).
+            pred_x = due_dt or created_dt
 
             series.append(
                 {
                     "created": created_dt,
+                    "pred_x": pred_x,
                     "pred": predicted_f,
                     "actual": actual_f,
                     "actual_x": actual_x,
@@ -645,9 +660,9 @@ try:
         if not series:
             st.info("No forecast history for this horizon yet.")
         else:
-            series = sorted(series, key=lambda r: r["created"])
-            x_pred = [r["created"] for r in series if r.get("pred") is not None and not math.isnan(r.get("pred"))]
-            y_pred = [r["pred"] for r in series if r.get("pred") is not None and not math.isnan(r.get("pred"))]
+            series = sorted(series, key=lambda r: (r.get('pred_x') or r["created"]))
+            x_pred = [r["pred_x"] for r in series if r.get("pred_x") and r.get("pred") is not None and not math.isnan(r.get("pred"))]
+            y_pred = [r["pred"] for r in series if r.get("pred_x") and r.get("pred") is not None and not math.isnan(r.get("pred"))]
 
             x_act = [r["actual_x"] for r in series if r.get("actual_x") and r.get("actual") is not None and not math.isnan(r.get("actual"))]
             y_act = [r["actual"] for r in series if r.get("actual_x") and r.get("actual") is not None and not math.isnan(r.get("actual"))]
@@ -656,7 +671,7 @@ try:
             if x_pred and y_pred:
                 fig2.add_trace(go.Scatter(x=x_pred, y=y_pred, mode="lines+markers", name="Forecast"))
             if x_act and y_act:
-                fig2.add_trace(go.Scatter(x=x_act, y=y_act, mode="markers", name="Actual"))
+                fig2.add_trace(go.Scatter(x=x_act, y=y_act, mode="lines+markers", name="Actual"))
 
             fig2.update_layout(
                 height=360,

@@ -1,9 +1,9 @@
-"""
-Forecasting Engine
-Generates probabilistic forecasts from news analysis
+"""Forecasting Engine.
+
+Generates probabilistic forecasts from news analysis.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple
 import json
 import config
@@ -20,11 +20,16 @@ class Forecaster:
         
         affected_assets = analysis['affected_assets']
         
+        horizons = getattr(config, 'RECOMMENDATION_HORIZONS', None)
+        enable_multi = getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', None)
+        if enable_multi is None:
+            enable_multi = bool(horizons)
+
         for asset in affected_assets:
             price_data = current_prices.get(asset, {})
 
-            if getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', False):
-                for horizon_key, horizon_minutes in (config.RECOMMENDATION_HORIZONS or {}).items():
+            if enable_multi and horizons:
+                for horizon_key, horizon_minutes in (horizons or {}).items():
                     forecast = self._create_forecast(
                         news_item,
                         analysis,
@@ -80,8 +85,8 @@ class Forecaster:
             asset, direction, category, sentiment
         )
         
-        # Timestamps
-        created_at = datetime.now()
+        # Timestamps (store as UTC, second precision, ISO-8601 with Z)
+        created_at = datetime.now(timezone.utc).replace(microsecond=0)
         due_at = created_at + timedelta(minutes=horizon_minutes)
         
         # Get current price (accept dict or float)
@@ -124,6 +129,13 @@ class Forecaster:
             'horizon_key': horizon_key,
         }
         
+        def _iso_z(dt: datetime) -> str:
+            try:
+                s = dt.isoformat()
+            except Exception:
+                s = str(dt)
+            return s.replace('+00:00', 'Z')
+
         return {
             'news_id': news_item.get('id'),
             'asset': asset,
@@ -132,8 +144,8 @@ class Forecaster:
             'risk_level': risk_level,
             'horizon_minutes': horizon_minutes,
             'horizon_key': horizon_key,
-            'created_at': created_at.isoformat(),
-            'due_at': due_at.isoformat(),
+            'created_at': _iso_z(created_at),
+            'due_at': _iso_z(due_at),
             'reasoning': reasoning,
             'scenario_base': scenario_base,
             'scenario_alt': scenario_alt,

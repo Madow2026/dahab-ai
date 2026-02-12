@@ -118,7 +118,7 @@ def _safe_overdue_pending_count():
             FROM forecasts
             WHERE status = 'active'
               AND due_at IS NOT NULL
-              AND datetime(due_at) <= datetime('now')
+                            AND datetime(replace(substr(due_at,1,19),'T',' ')) <= datetime('now')
             """
         )
         n = int(cursor.fetchone()[0])
@@ -137,11 +137,17 @@ def _bucket_horizon_minutes(horizon_minutes: int) -> str:
     if horizon_minutes == 15:
         return '15m'
     if horizon_minutes == 60:
-        return '1h'
-    if horizon_minutes == 240:
-        return '4h'
-    if horizon_minutes == 1440:
-        return '1d'
+        return '60m'
+    if horizon_minutes == 360:
+        return '6h'
+    if horizon_minutes == 720:
+        return '12h'
+    if horizon_minutes == 2160:
+        return '36h'
+    if horizon_minutes == 2880:
+        return '48h'
+    if horizon_minutes == 4320:
+        return '72h'
     return 'Other'
 
 
@@ -151,22 +157,28 @@ pending_counts_raw = _safe_pending_forecast_counts()
 pending_total = sum(pending_counts_raw.values())
 pending_overdue = _safe_overdue_pending_count() if pending_total else 0
 
-bucketed = {'15m': 0, '1h': 0, '4h': 0, '1d': 0, 'Other': 0}
+bucketed = {'15m': 0, '60m': 0, '6h': 0, '12h': 0, '36h': 0, '48h': 0, '72h': 0, 'Other': 0}
 for horizon, count in pending_counts_raw.items():
     label = _bucket_horizon_minutes(horizon)
     bucketed[label] = bucketed.get(label, 0) + int(count or 0)
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
 with col1:
     st.metric("Pending (Total)", pending_total)
 with col2:
     st.metric("15m", bucketed.get('15m', 0))
 with col3:
-    st.metric("1h", bucketed.get('1h', 0))
+    st.metric("60m", bucketed.get('60m', 0))
 with col4:
-    st.metric("4h", bucketed.get('4h', 0))
+    st.metric("6h", bucketed.get('6h', 0))
 with col5:
-    st.metric("1d", bucketed.get('1d', 0))
+    st.metric("12h", bucketed.get('12h', 0))
+with col6:
+    st.metric("36h", bucketed.get('36h', 0))
+with col7:
+    st.metric("48h", bucketed.get('48h', 0))
+with col8:
+    st.metric("72h", bucketed.get('72h', 0))
 
 if pending_total == 0:
     st.info("No pending forecasts right now.")
@@ -318,22 +330,96 @@ else:
 
     st.markdown("---")
 
-    # Accuracy by Horizon
+    # Accuracy by Horizon (requested multi-horizon set)
     if 'horizon_minutes' in df.columns:
         st.subheader("⏱️ Accuracy by Horizon")
-        horizon_stats = df.groupby('horizon_minutes').agg({
-            'is_hit': ['sum', 'count'],
-            'pct_error_val': 'mean',
-        }).reset_index()
-        horizon_stats.columns = ['horizon_minutes', 'accurate', 'total', 'avg_pct_error']
-        horizon_stats['accuracy_rate'] = (horizon_stats['accurate'] / horizon_stats['total'] * 100)
-        horizon_stats = horizon_stats.sort_values('horizon_minutes')
+        df['horizon_label'] = df['horizon_minutes'].apply(lambda x: _bucket_horizon_minutes(int(x) if pd.notna(x) else 0))
+
+        horizon_order = ['15m', '60m', '6h', '12h', '36h', '48h', '72h', 'Other']
+        horizon_stats = df.groupby('horizon_label', observed=True).agg(
+            accurate=('is_hit', 'sum'),
+            total=('is_hit', 'count'),
+            avg_pct_error=('pct_error_val', 'mean'),
+            avg_abs_error=('abs_error_val', 'mean'),
+        ).reset_index()
+        horizon_stats['accuracy_rate'] = (horizon_stats['accurate'] / horizon_stats['total'] * 100.0).round(3)
+        horizon_stats['horizon_label'] = pd.Categorical(horizon_stats['horizon_label'], categories=horizon_order, ordered=True)
+        horizon_stats = horizon_stats.sort_values('horizon_label')
+
         st.dataframe(
-            horizon_stats.style.format({'accuracy_rate': '{:.1f}%', 'avg_pct_error': '{:.2f}%'}),
+            horizon_stats.style.format(
+                {
+                    'accuracy_rate': '{:.1f}%',
+                    'avg_pct_error': '{:.2f}%',
+                    'avg_abs_error': '{:.4f}',
+                }
+            ),
             use_container_width=True,
         )
 
     st.markdown("---")
+
+    # Growth / decline rate chart (Gold)
+    st.subheader("📈 Gold Rise/Fall Rate (Daily)")
+    st.caption("Daily percentage change based on last available Gold price each day.")
+
+    days = 30
+    try:
+        conn = db.get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT asset, price, timestamp
+            FROM prices
+            WHERE asset = 'Gold'
+              AND timestamp IS NOT NULL AND timestamp != ''
+              AND datetime(replace(substr(timestamp,1,19),'T',' ')) >= datetime('now', ?)
+            ORDER BY datetime(replace(substr(timestamp,1,19),'T',' ')) ASC
+            """,
+            (f'-{int(days)} days',),
+        )
+        price_rows = cur.fetchall() or []
+        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        price_rows = []
+
+    if not price_rows:
+        st.info("No Gold price history found yet.")
+    else:
+        pdf = pd.DataFrame(price_rows, columns=['asset', 'price', 'timestamp'])
+        pdf['timestamp'] = pd.to_datetime(pdf['timestamp'], errors='coerce', utc=True)
+        pdf = pdf.dropna(subset=['timestamp', 'price']).copy()
+        pdf['price'] = pd.to_numeric(pdf['price'], errors='coerce')
+        pdf = pdf.dropna(subset=['price']).copy()
+        pdf['date'] = pdf['timestamp'].dt.date
+
+        # Last price per day (close proxy)
+        daily = pdf.sort_values('timestamp').groupby('date').tail(1).sort_values('date')
+        daily['daily_pct_change'] = daily['price'].pct_change() * 100.0
+
+        fig_ret = go.Figure()
+        fig_ret.add_trace(
+            go.Bar(
+                x=daily['date'],
+                y=daily['daily_pct_change'],
+                name='Daily % Change',
+            )
+        )
+        fig_ret.update_layout(
+            title='Gold Daily Rise/Fall Rate',
+            xaxis_title='Date',
+            yaxis_title='Change (%)',
+            paper_bgcolor='#0E1117',
+            plot_bgcolor='#1E2130',
+            font={'color': '#FAFAFA'},
+            height=360,
+            hovermode='x unified',
+        )
+        st.plotly_chart(fig_ret, use_container_width=True)
 
     # Evaluated forecasts table
     st.subheader("✅ Evaluated Forecasts")

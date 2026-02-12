@@ -242,6 +242,21 @@ class StreamlitWorker:
     def _generate_forecasts(self):
         """Generate forecasts from recent news"""
         try:
+            # Detect schema capabilities once per cycle (legacy DBs may miss newer columns).
+            try:
+                _conn = self.db.get_connection()
+                _cur = _conn.cursor()
+                _cur.execute("PRAGMA table_info(forecasts)")
+                _fcols = {r[1] for r in (_cur.fetchall() or [])}
+                _conn.close()
+            except Exception:
+                try:
+                    _conn.close()
+                except Exception:
+                    pass
+                _fcols = set()
+            has_horizon_key = 'horizon_key' in _fcols
+
             # Best-effort current prices (cached or last known from DB)
             # Build this first so we can create baseline forecasts even when there is no news.
             current_prices = {}
@@ -322,17 +337,30 @@ class StreamlitWorker:
                                     cooldown_min = 30
 
                                 # Look at the latest forecast for this horizon.
-                                cur.execute(
-                                    f"""
-                                    SELECT created_at, due_at, status
-                                    FROM forecasts
-                                    WHERE asset = ?
-                                      AND (COALESCE(horizon_key,'') = ? OR COALESCE(horizon_minutes,0) = ?)
-                                    ORDER BY {dt_expr} DESC, id DESC
-                                    LIMIT 1
-                                    """,
-                                    (asset, hk, int(hm)),
-                                )
+                                if has_horizon_key:
+                                    cur.execute(
+                                        f"""
+                                        SELECT created_at, due_at, status
+                                        FROM forecasts
+                                        WHERE asset = ?
+                                          AND (COALESCE(horizon_key,'') = ? OR COALESCE(horizon_minutes,0) = ?)
+                                        ORDER BY {dt_expr} DESC, id DESC
+                                        LIMIT 1
+                                        """,
+                                        (asset, hk, int(hm)),
+                                    )
+                                else:
+                                    cur.execute(
+                                        f"""
+                                        SELECT created_at, due_at, status
+                                        FROM forecasts
+                                        WHERE asset = ?
+                                          AND COALESCE(horizon_minutes,0) = ?
+                                        ORDER BY {dt_expr} DESC, id DESC
+                                        LIMIT 1
+                                        """,
+                                        (asset, int(hm)),
+                                    )
                                 row = cur.fetchone()
                                 now_dt = datetime.now(timezone.utc)
 
@@ -456,16 +484,23 @@ class StreamlitWorker:
                 try:
                     conn = self.db.get_connection()
                     cur = conn.cursor()
-                    cur.execute(
-                        "SELECT asset, COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0) FROM forecasts WHERE news_id = ?",
-                        (news_id,),
-                    )
+                    if has_horizon_key:
+                        cur.execute(
+                            "SELECT asset, COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0) FROM forecasts WHERE news_id = ?",
+                            (news_id,),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT asset, NULL, COALESCE(horizon_minutes, 0) FROM forecasts WHERE news_id = ?",
+                            (news_id,),
+                        )
                     rows = cur.fetchall()
                     conn.close()
                     keys = set()
                     for r in rows or []:
                         asset = (r[0] or '').strip()
-                        hk = (r[1] or '').strip()
+                        hk = (r[1] or '')
+                        hk = (hk or '').strip() if hk is not None else ''
                         hm = int(r[2] or 0)
                         keys.add((asset, hk if hk else str(hm)))
                     return keys

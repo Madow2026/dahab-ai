@@ -489,17 +489,42 @@ class WorkerProcess:
                     asset = 'Gold'
                     price_data = current_prices_data.get(asset)
                     if price_data and price_data.get('price') is not None:
+                        # Legacy DBs may not have horizon_key yet.
+                        try:
+                            conn = self.db.get_connection()
+                            cur = conn.cursor()
+                            cur.execute("PRAGMA table_info(forecasts)")
+                            fcols = {r[1] for r in (cur.fetchall() or [])}
+                            conn.close()
+                        except Exception:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            fcols = set()
+                        has_horizon_key = 'horizon_key' in fcols
+
                         expected = [(str(k), int(v)) for k, v in (config.RECOMMENDATION_HORIZONS or {}).items()]
                         conn = self.db.get_connection()
                         cur = conn.cursor()
-                        cur.execute(
-                            """
-                            SELECT COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0)
-                            FROM forecasts
-                            WHERE asset = ? AND status = 'active'
-                            """,
-                            (asset,),
-                        )
+                        if has_horizon_key:
+                            cur.execute(
+                                """
+                                SELECT COALESCE(horizon_key, ''), COALESCE(horizon_minutes, 0)
+                                FROM forecasts
+                                WHERE asset = ? AND status = 'active'
+                                """,
+                                (asset,),
+                            )
+                        else:
+                            cur.execute(
+                                """
+                                SELECT NULL, COALESCE(horizon_minutes, 0)
+                                FROM forecasts
+                                WHERE asset = ? AND status = 'active'
+                                """,
+                                (asset,),
+                            )
                         rows = cur.fetchall() or []
                         conn.close()
 
@@ -516,7 +541,11 @@ class WorkerProcess:
                             if hm_i:
                                 active_minutes.add(hm_i)
 
-                        missing = [(hk, hm) for hk, hm in expected if hk not in active_keys and hm not in active_minutes]
+                        # If horizon_key isn't available in DB, rely only on horizon_minutes.
+                        if has_horizon_key:
+                            missing = [(hk, hm) for hk, hm in expected if hk not in active_keys and hm not in active_minutes]
+                        else:
+                            missing = [(hk, hm) for hk, hm in expected if hm not in active_minutes]
                         if missing:
                             synthetic_news = {
                                 'id': None,

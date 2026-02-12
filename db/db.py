@@ -2395,18 +2395,23 @@ class Database:
             params.append(risk_level.upper())
 
         if days and days > 0:
-            conditions.append(f"datetime(COALESCE(created_at, due_at)) > datetime('now', '-{int(days)} days')")
+            conditions.append(
+                f"datetime(replace(substr(COALESCE(created_at, due_at),1,19),'T',' ')) > datetime('now', '-{int(days)} days')"
+            )
 
         where = ""
         if conditions:
             where = "WHERE " + " AND ".join(conditions)
 
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             SELECT * FROM forecasts
             {where}
-            ORDER BY datetime(COALESCE(created_at, due_at)) DESC
+            ORDER BY datetime(replace(substr(COALESCE(created_at, due_at),1,19),'T',' ')) DESC, id DESC
             LIMIT ?
-        """, (*params, limit))
+            """,
+            (*params, limit),
+        )
 
         results = [dict(row) for row in cursor.fetchall()]
         conn.close()
