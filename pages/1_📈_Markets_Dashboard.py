@@ -11,6 +11,7 @@ import sys
 import os
 import time
 import math
+import config
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -105,14 +106,15 @@ def _fmt_horizon_label(forecast: dict) -> str:
         return "24h"
     if hm == 360:
         return "6h"
-    if hm == 2160:
-        return "36h"
     if hm == 2880:
         return "48h"
     if hm == 4320:
         return "72h"
     if hm == 5760:
         return "96h"
+    if hm == 2160:
+        # Legacy horizon retained in older DB rows; keep it non-selectable.
+        return "2160m"
     if hm >= 1440 and hm % 1440 == 0:
         return f"{hm // 1440}d"
     if hm >= 60 and hm % 60 == 0:
@@ -157,7 +159,6 @@ def _project_predicted_price(price0: float, direction: str, confidence_pct: floa
         60: 0.0025,
         360: 0.0080,
         720: 0.0100,
-        2160: 0.0220,
         2880: 0.0260,
         4320: 0.0300,
     }
@@ -422,7 +423,9 @@ try:
         st.info("No Gold forecasts found yet. The worker may still be generating multi-horizon forecasts.")
     else:
         rows = []
-        wanted = ["15m", "60m", "6h", "12h", "36h", "48h", "72h"]
+        wanted = list((getattr(config, 'RECOMMENDATION_HORIZONS', None) or {}).keys())
+        if not wanted:
+            wanted = ["15m", "60m", "6h", "12h", "48h", "72h"]
         now_utc = datetime.utcnow()
 
         def _due_in_text(due_dt: datetime | None) -> str:
@@ -579,7 +582,9 @@ try:
 
         # Trend chart: how the forecast updates over time vs actual outcomes.
         st.subheader("📉 Gold Forecast vs Actual (Trend)")
-        wanted = ["15m", "60m", "6h", "12h", "36h", "48h", "72h"]
+        wanted = list((getattr(config, 'RECOMMENDATION_HORIZONS', None) or {}).keys())
+        if not wanted:
+            wanted = ["15m", "60m", "6h", "12h", "48h", "72h"]
         selected_h = st.selectbox("Horizon", wanted, index=1)
         window_minutes = _horizon_to_minutes(selected_h)
         window_start = now_utc - timedelta(minutes=window_minutes) if window_minutes else None

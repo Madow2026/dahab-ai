@@ -192,7 +192,6 @@ def _project_forecast_endpoint(forecast: Dict) -> Tuple[Optional[datetime], Opti
         360: 0.0080,   # 6h
         720: 0.0100,   # 12h
         1440: 0.0150,  # 24h
-        2160: 0.0220,  # 36h
         2880: 0.0260,  # 48h
         4320: 0.0300,  # 72h
         5760: 0.0400,  # 96h

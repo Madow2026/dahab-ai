@@ -19,29 +19,34 @@ class Forecaster:
         forecasts = []
         
         affected_assets = analysis['affected_assets']
-        
-        horizons = getattr(config, 'RECOMMENDATION_HORIZONS', None)
-        enable_multi = getattr(config, 'ENABLE_MULTI_HORIZON_RECOMMENDATIONS', None)
-        if enable_multi is None:
-            enable_multi = bool(horizons)
+
+        # Strict enforcement: always generate the configured multi-horizon set.
+        horizons = getattr(config, 'RECOMMENDATION_HORIZONS', None) or {}
+        if not isinstance(horizons, dict) or not horizons:
+            # Deterministic fallback (should not happen in production; keeps behavior explicit).
+            horizons = {
+                "15m": 15,
+                "60m": 60,
+                "6h": 360,
+                "12h": 720,
+                "48h": 2880,
+                "72h": 4320,
+            }
+
+        utc_now = datetime.now(timezone.utc).replace(microsecond=0)
 
         for asset in affected_assets:
             price_data = current_prices.get(asset, {})
 
-            if enable_multi and horizons:
-                for horizon_key, horizon_minutes in (horizons or {}).items():
-                    forecast = self._create_forecast(
-                        news_item,
-                        analysis,
-                        asset,
-                        price_data,
-                        horizon_minutes=int(horizon_minutes),
-                        horizon_key=str(horizon_key),
-                    )
-                    forecasts.append(forecast)
-            else:
+            for horizon_key, horizon_minutes in horizons.items():
                 forecast = self._create_forecast(
-                    news_item, analysis, asset, price_data
+                    news_item,
+                    analysis,
+                    asset,
+                    price_data,
+                    horizon_minutes=int(horizon_minutes),
+                    horizon_key=str(horizon_key),
+                    created_at_utc=utc_now,
                 )
                 forecasts.append(forecast)
         
@@ -55,6 +60,7 @@ class Forecaster:
         price_data,
         horizon_minutes: int = None,
         horizon_key: str = None,
+        created_at_utc: datetime | None = None,
     ) -> Dict:
         """Create single forecast for asset"""
         category = analysis['category']
@@ -86,7 +92,7 @@ class Forecaster:
         )
         
         # Timestamps (store as UTC, second precision, ISO-8601 with Z)
-        created_at = datetime.now(timezone.utc).replace(microsecond=0)
+        created_at = created_at_utc or datetime.now(timezone.utc).replace(microsecond=0)
         due_at = created_at + timedelta(minutes=horizon_minutes)
         
         # Get current price (accept dict or float)
@@ -146,6 +152,7 @@ class Forecaster:
             'horizon_key': horizon_key,
             'created_at': _iso_z(created_at),
             'due_at': _iso_z(due_at),
+            'status': 'active',
             'reasoning': reasoning,
             'scenario_base': scenario_base,
             'scenario_alt': scenario_alt,

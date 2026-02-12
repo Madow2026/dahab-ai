@@ -12,6 +12,8 @@ import pandas as pd
 import sys
 import os
 
+import config
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from db.db import get_db
@@ -196,8 +198,6 @@ def _bucket_horizon_minutes(horizon_minutes: int) -> str:
         return '6h'
     if horizon_minutes == 720:
         return '12h'
-    if horizon_minutes == 2160:
-        return '36h'
     if horizon_minutes == 2880:
         return '48h'
     if horizon_minutes == 4320:
@@ -211,12 +211,12 @@ pending_counts_raw = _safe_pending_forecast_counts()
 pending_total = sum(pending_counts_raw.values())
 pending_overdue = _safe_overdue_pending_count() if pending_total else 0
 
-bucketed = {'15m': 0, '60m': 0, '6h': 0, '12h': 0, '36h': 0, '48h': 0, '72h': 0, 'Other': 0}
+bucketed = {'15m': 0, '60m': 0, '6h': 0, '12h': 0, '48h': 0, '72h': 0, 'Other': 0}
 for horizon, count in pending_counts_raw.items():
     label = _bucket_horizon_minutes(horizon)
     bucketed[label] = bucketed.get(label, 0) + int(count or 0)
 
-col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
+col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
 with col1:
     st.metric("Pending (Total)", pending_total)
 with col2:
@@ -228,10 +228,8 @@ with col4:
 with col5:
     st.metric("12h", bucketed.get('12h', 0))
 with col6:
-    st.metric("36h", bucketed.get('36h', 0))
-with col7:
     st.metric("48h", bucketed.get('48h', 0))
-with col8:
+with col7:
     st.metric("72h", bucketed.get('72h', 0))
 
 if pending_total == 0:
@@ -252,7 +250,10 @@ st.subheader("📉 Growth / Decline Performance")
 st.caption("Aggregates evaluated forecasts into daily predicted vs actual performance, with cumulative and drawdown charts.")
 
 asset_filter = st.selectbox("Asset", ["All", "Gold", "Silver", "Oil", "Bitcoin", "USD Index"], index=0)
-horizon_filter = st.selectbox("Horizon", ["All", "15m", "60m", "6h", "12h", "36h", "48h", "72h"], index=0)
+_hlist = list((getattr(config, 'RECOMMENDATION_HORIZONS', None) or {}).keys())
+if not _hlist:
+    _hlist = ["15m", "60m", "6h", "12h", "48h", "72h"]
+horizon_filter = st.selectbox("Horizon", ["All"] + _hlist, index=0)
 
 eval_rows = fetch_evaluated_forecasts(db, window_days=int(window_days), asset=None if asset_filter == 'All' else asset_filter)
 if not eval_rows:
@@ -267,7 +268,7 @@ else:
         edf = edf[edf['asset'] == asset_filter]
 
     if horizon_filter != 'All' and 'horizon_minutes' in edf.columns:
-        hm_map = {'15m': 15, '60m': 60, '6h': 360, '12h': 720, '36h': 2160, '48h': 2880, '72h': 4320}
+        hm_map = {'15m': 15, '60m': 60, '6h': 360, '12h': 720, '48h': 2880, '72h': 4320}
         hm = hm_map.get(horizon_filter)
         if hm is not None:
             edf = edf[pd.to_numeric(edf['horizon_minutes'], errors='coerce').fillna(-1).astype(int) == int(hm)]
@@ -437,7 +438,7 @@ else:
         st.subheader("⏱️ Accuracy by Horizon")
         df['horizon_label'] = df['horizon_minutes'].apply(lambda x: _bucket_horizon_minutes(int(x) if pd.notna(x) else 0))
 
-        horizon_order = ['15m', '60m', '6h', '12h', '36h', '48h', '72h', 'Other']
+        horizon_order = ['15m', '60m', '6h', '12h', '48h', '72h', 'Other']
         horizon_stats = df.groupby('horizon_label', observed=True).agg(
             accurate=('is_hit', 'sum'),
             total=('is_hit', 'count'),
