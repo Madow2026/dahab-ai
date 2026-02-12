@@ -1336,6 +1336,7 @@ class Database:
             ('news_category', forecast_data.get('news_category')),
             ('news_sentiment', forecast_data.get('news_sentiment')),
             ('impact_level', forecast_data.get('impact_level')),
+            ('status', forecast_data.get('status') or 'active'),
             ('recommendation_group_id', forecast_data.get('recommendation_group_id')),
         ]
         for name, value in optional:
