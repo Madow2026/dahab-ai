@@ -16,6 +16,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import math
 
+from forecast_logic import normalize_forecast_record
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -98,7 +100,7 @@ def fetch_evaluated_forecasts(
         """,
         tuple(params),
     )
-    rows = [dict(r) for r in cur.fetchall()]
+    rows = [normalize_forecast_record(dict(r)) for r in cur.fetchall()]
     conn.close()
     return rows
 
@@ -233,7 +235,7 @@ def compute_and_store_evaluation_summary(
     """Compute metrics per (asset,horizon) + weighted overall accuracy and persist to DB."""
 
     if horizons is None:
-        horizons = [("15m", 15), ("60m", 60), ("6h", 360), ("12h", 720), ("48h", 2880), ("72h", 4320)]
+        horizons = [("15m", 15), ("60m", 60), ("6h", 360), ("12h", 720), ("36h", 2160), ("48h", 2880), ("72h", 4320)]
 
     if assets is None:
         assets = ["Gold", "Silver", "Oil", "Bitcoin", "USD Index"]
