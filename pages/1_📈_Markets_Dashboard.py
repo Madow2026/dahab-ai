@@ -6,6 +6,7 @@ AUTO-REFRESHING - Read-only display
 
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 import sys
 import os
@@ -580,124 +581,62 @@ try:
 
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
-        # Trend chart: how the forecast updates over time vs actual outcomes.
-        st.subheader("📉 Gold Forecast vs Actual (Trend)")
-        wanted = list((getattr(config, 'RECOMMENDATION_HORIZONS', None) or {}).keys())
-        if not wanted:
-            wanted = ["15m", "60m", "6h", "12h", "48h", "72h"]
-        selected_h = st.selectbox("Horizon", wanted, index=1)
-        window_minutes = _horizon_to_minutes(selected_h)
-        window_start = now_utc - timedelta(minutes=window_minutes) if window_minutes else None
-        window_end = now_utc + timedelta(minutes=window_minutes) if window_minutes else None
-
-        try:
-            hist = db.get_all_forecasts_history(limit=2000, asset="Gold", days=30) or []
-        except Exception:
-            hist = gold_forecasts or []
-
-        series = []
-
-        def _to_naive_utc(dt: datetime | None) -> datetime | None:
-            if not dt:
-                return None
-            try:
-                if getattr(dt, 'tzinfo', None) is not None:
-                    return dt.astimezone(timezone.utc).replace(tzinfo=None)
-                return dt
-            except Exception:
-                return dt
-
-        for f in hist:
-            if _fmt_horizon_label(f) != selected_h:
+        # Clear chart by horizon (matches expected grouped bar style)
+        st.subheader("📊 Gold Forecast vs Actual by Horizon")
+    snapshot = []
+    try:
+        hist_snap = db.get_all_forecasts_history(limit=2000, asset="Gold", days=7) or []
+        latest_by_h = {}
+        for f in hist_snap:
+            hlabel = _fmt_horizon_label(f)
+            if hlabel not in (getattr(config, 'RECOMMENDATION_HORIZONS', {}) or {'15m','60m','6h','12h','48h','72h'}):
                 continue
             created_dt = _parse_dt(f.get("created_at") or f.get("forecast_time"))
             if not created_dt:
                 continue
-            created_dt = _to_naive_utc(created_dt)
-            if window_start is not None:
-                try:
-                    cd = created_dt
-                    if cd < window_start:
-                        continue
-                except Exception:
-                    pass
-
-            direction = str(f.get("direction") or "").upper()
-            predicted = f.get("predicted_price")
-            predicted_f = None
-            if predicted is not None and str(predicted) != "":
-                predicted_f = _safe_float(predicted, default=math.nan)
-            if predicted_f is None or math.isnan(predicted_f):
-                price0 = f.get("price_at_forecast")
-                hm = int(_safe_float(f.get("horizon_minutes"), 0))
-                proj = _project_predicted_price(
-                    price0,
-                    direction=direction,
+            pred = f.get("predicted_price")
+            if pred is None or str(pred) == "":
+                pred = _project_predicted_price(
+                    f.get("price_at_forecast"),
+                    direction=str(f.get("direction") or ""),
                     confidence_pct=_safe_float(f.get("confidence"), 0.0),
-                    horizon_minutes=hm,
+                    horizon_minutes=_safe_float(f.get("horizon_minutes"), 0),
                 )
-                if not math.isnan(proj):
-                    predicted_f = proj
+            act = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
 
-            actual = f.get("actual_price") or f.get("price_at_evaluation") or f.get("realized_price")
-            actual_f = None
-            if actual is not None and str(actual) != "":
-                actual_f = _safe_float(actual, default=math.nan)
-
-            due_dt = _to_naive_utc(_compute_due_dt(f))
-            eval_dt = _to_naive_utc(_parse_dt(f.get("evaluated_at")))
-            actual_x = eval_dt or due_dt
-
-            # Use due time as the common x-axis for both series.
-            # This makes comparison readable (forecast is for the horizon endpoint).
-            pred_x = due_dt or created_dt
-
-            series.append(
-                {
+            rec = latest_by_h.get(hlabel)
+            if rec is None or created_dt > rec["created"]:
+                latest_by_h[hlabel] = {
                     "created": created_dt,
-                    "pred_x": pred_x,
-                    "pred": predicted_f,
-                    "actual": actual_f,
-                    "actual_x": actual_x,
-                    "status": str(f.get("status") or "").lower(),
+                    "h": hlabel,
+                    "pred": _safe_float(pred, default=math.nan),
+                    "act": _safe_float(act, default=math.nan),
                 }
-            )
 
-        if not series:
-            st.info("No forecast history for this horizon yet.")
-        else:
-            series = sorted(series, key=lambda r: (r.get('pred_x') or r["created"]))
-            x_pred = [r["pred_x"] for r in series if r.get("pred_x") and r.get("pred") is not None and not math.isnan(r.get("pred"))]
-            y_pred = [r["pred"] for r in series if r.get("pred_x") and r.get("pred") is not None and not math.isnan(r.get("pred"))]
+        for h in (list((getattr(config, 'RECOMMENDATION_HORIZONS', {}) or {}).keys()) or ["15m","60m","6h","12h","48h","72h"]):
+            rec = latest_by_h.get(h)
+            if rec:
+                snapshot.append(rec)
+    except Exception:
+        snapshot = []
 
-            x_act = [r["actual_x"] for r in series if r.get("actual_x") and r.get("actual") is not None and not math.isnan(r.get("actual"))]
-            y_act = [r["actual"] for r in series if r.get("actual_x") and r.get("actual") is not None and not math.isnan(r.get("actual"))]
-
-            fig2 = go.Figure()
-            if x_pred and y_pred:
-                fig2.add_trace(go.Scatter(x=x_pred, y=y_pred, mode="lines+markers", name="Forecast"))
-            if x_act and y_act:
-                fig2.add_trace(go.Scatter(x=x_act, y=y_act, mode="lines+markers", name="Actual"))
-            else:
-                fig2.add_annotation(
-                    text="Awaiting evaluation",
-                    xref="paper",
-                    yref="paper",
-                    x=0.01,
-                    y=0.99,
-                    showarrow=False,
-                )
-
-            fig2.update_layout(
-                height=360,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="Time (UTC)",
-                yaxis_title="Gold Price",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            if window_start is not None:
-                fig2.update_xaxes(range=[window_start, window_end or now_utc])
-            st.plotly_chart(fig2, use_container_width=True)
+    if snapshot:
+        snap_df = pd.DataFrame(snapshot)
+        fig_bar = go.Figure()
+        fig_bar.add_bar(x=snap_df["h"], y=snap_df["pred"], name="Predict", marker_color="#5b9bd5")
+        fig_bar.add_bar(x=snap_df["h"], y=snap_df["act"], name="Actual", marker_color="#ed7d31")
+        fig_bar.update_layout(
+            barmode="group",
+            height=420,
+            margin=dict(l=20, r=10, t=30, b=60),
+            yaxis_title="Gold Price",
+            xaxis_title="Horizon",
+            hovermode="x",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+        st.info("No recent forecast/actual pairs yet to plot by horizon.")
 
     st.markdown("---")
 
