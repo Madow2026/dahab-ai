@@ -87,6 +87,33 @@ try:
         """
     )
     sum_rows = cur.fetchall() or []
+
+    # Latest KPI snapshot (overall accuracy + avg MAE/MAPE across horizons)
+    latest_kpi = None
+    try:
+        cur.execute(
+            """
+            SELECT computed_at,
+                   weighted_overall_accuracy,
+                   AVG(mae) AS avg_mae,
+                   AVG(mape) AS avg_mape
+            FROM evaluation_summary
+            GROUP BY computed_at
+            ORDER BY datetime(replace(substr(computed_at,1,19),'T',' ')) DESC, computed_at DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        if row:
+            latest_kpi = {
+                'computed_at': row[0],
+                'weighted_overall_accuracy': row[1],
+                'avg_mae': row[2],
+                'avg_mape': row[3],
+            }
+    except Exception:
+        latest_kpi = None
+
     conn.close()
 except Exception:
     try:
@@ -94,8 +121,18 @@ except Exception:
     except Exception:
         pass
     sum_rows = []
+    latest_kpi = None
 
 if sum_rows:
+    if latest_kpi:
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.metric("Weighted Accuracy", f"{(latest_kpi.get('weighted_overall_accuracy') or 0):.2f}%")
+        with k2:
+            st.metric("Avg MAE", f"{(latest_kpi.get('avg_mae') or 0):.4f}")
+        with k3:
+            st.metric("Avg MAPE", f"{(latest_kpi.get('avg_mape') or 0):.2f}%")
+
     sdf = pd.DataFrame(
         sum_rows,
         columns=[
