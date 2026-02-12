@@ -173,6 +173,32 @@ def migrate_database(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rechist_eval ON recommendation_history(evaluated_at)")
 
         # ------------------------------------------------------------------
+        # Evaluation summary (aggregated metrics, append-only)
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evaluation_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                computed_at TEXT NOT NULL,
+                window_days INTEGER NOT NULL,
+                asset TEXT NOT NULL,
+                horizon_minutes INTEGER,
+                horizon_key TEXT,
+                n_total INTEGER NOT NULL,
+                n_hit INTEGER NOT NULL,
+                directional_accuracy REAL,
+                mae REAL,
+                mape REAL,
+                avg_confidence REAL,
+                calibration_score REAL,
+                weighted_overall_accuracy REAL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evalsum_computed ON evaluation_summary(computed_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evalsum_asset_h ON evaluation_summary(asset, horizon_minutes)")
+
+        # ------------------------------------------------------------------
         # Optional news archival table (manual use only; never auto-delete news)
         # ------------------------------------------------------------------
         conn.execute(

@@ -1831,7 +1831,8 @@ class Database:
 
         Crash-proof behavior:
         - If no evaluated timestamp columns exist, returns empty list.
-        - Uses created_at/forecast_time ordering depending on what exists.
+        - Ignores rows with empty evaluated timestamps.
+        - Orders by normalized evaluated timestamp + id tiebreak.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -1849,17 +1850,13 @@ class Database:
             conn.close()
             return []
 
-        # Determine forecast time column
-        order_col = 'created_at' if 'created_at' in cols else ('forecast_time' if 'forecast_time' in cols else None)
-        if not order_col:
-            conn.close()
-            return []
-
+        eval_expr = self._sql_dt_expr(evaluated_col)
         cursor.execute(
             f"""
             SELECT * FROM forecasts
             WHERE {evaluated_col} IS NOT NULL
-            ORDER BY datetime({order_col}) DESC
+              AND {evaluated_col} != ''
+            ORDER BY {eval_expr} DESC, id DESC
             LIMIT ?
             """,
             (limit,),
