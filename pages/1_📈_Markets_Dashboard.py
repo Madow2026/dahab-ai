@@ -673,6 +673,15 @@ try:
                 fig2.add_trace(go.Scatter(x=x_pred, y=y_pred, mode="lines+markers", name="Forecast"))
             if x_act and y_act:
                 fig2.add_trace(go.Scatter(x=x_act, y=y_act, mode="lines+markers", name="Actual"))
+            else:
+                fig2.add_annotation(
+                    text="Awaiting evaluation",
+                    xref="paper",
+                    yref="paper",
+                    x=0.01,
+                    y=0.99,
+                    showarrow=False,
+                )
 
             fig2.update_layout(
                 height=360,

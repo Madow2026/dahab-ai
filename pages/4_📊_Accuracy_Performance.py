@@ -18,6 +18,9 @@ from db.db import get_db
 from ui.sidebar import render_sidebar
 from streamlit_worker import ensure_worker_running
 
+from evaluation_engine import compute_and_store_evaluation_summary, fetch_evaluated_forecasts
+from charts import performance_triplet
+
 st.set_page_config(page_title="Accuracy & Performance", page_icon="📊", layout="wide")
 
 # Ensure background worker is running
@@ -51,6 +54,57 @@ except Exception:
 new_since = int(st.session_state.get(f"_page_new_since_{PAGE_KEY}", 0) or 0)
 
 st.caption(f"Last updated: {last_updated or '—'} | New since last visit: {new_since}")
+
+st.markdown("---")
+st.subheader("🧮 Evaluation Summary (Production Metrics)")
+
+window_days = st.selectbox("Window (days)", [14, 30, 60, 90], index=2)
+if st.button("Compute & store evaluation summary", type="secondary"):
+    with st.spinner("Computing metrics..."):
+        try:
+            _ = compute_and_store_evaluation_summary(db, window_days=int(window_days))
+            st.success("Evaluation summary stored.")
+        except Exception as e:
+            st.error("Failed to compute/store summary.")
+            try:
+                db.log('ERROR', 'UI', f"Eval summary failed: {e}")
+            except Exception:
+                pass
+
+try:
+    conn = db.get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT computed_at, window_days, asset, horizon_key, horizon_minutes,
+               n_total, n_hit, directional_accuracy, mae, mape, avg_confidence,
+               calibration_score, weighted_overall_accuracy
+        FROM evaluation_summary
+        ORDER BY datetime(replace(substr(computed_at,1,19),'T',' ')) DESC, id DESC
+        LIMIT 200
+        """
+    )
+    sum_rows = cur.fetchall() or []
+    conn.close()
+except Exception:
+    try:
+        conn.close()
+    except Exception:
+        pass
+    sum_rows = []
+
+if sum_rows:
+    sdf = pd.DataFrame(
+        sum_rows,
+        columns=[
+            'computed_at', 'window_days', 'asset', 'horizon_key', 'horizon_minutes',
+            'n_total', 'n_hit', 'directional_accuracy', 'mae', 'mape', 'avg_confidence',
+            'calibration_score', 'weighted_overall_accuracy'
+        ],
+    )
+    st.dataframe(sdf, use_container_width=True, hide_index=True)
+else:
+    st.info("No evaluation summary rows yet. Click 'Compute & store evaluation summary'.")
 
 col_eval_btn, _ = st.columns([1, 3])
 with col_eval_btn:
@@ -192,6 +246,54 @@ else:
         )
 
 st.markdown("---")
+
+# Growth / decline performance (daily aggregation)
+st.subheader("📉 Growth / Decline Performance")
+st.caption("Aggregates evaluated forecasts into daily predicted vs actual performance, with cumulative and drawdown charts.")
+
+asset_filter = st.selectbox("Asset", ["All", "Gold", "Silver", "Oil", "Bitcoin", "USD Index"], index=0)
+horizon_filter = st.selectbox("Horizon", ["All", "15m", "60m", "6h", "12h", "36h", "48h", "72h"], index=0)
+
+eval_rows = fetch_evaluated_forecasts(db, window_days=int(window_days), asset=None if asset_filter == 'All' else asset_filter)
+if not eval_rows:
+    st.info("No evaluated forecasts available for the selected window.")
+else:
+    edf = pd.DataFrame(eval_rows)
+    edf['evaluated_at'] = pd.to_datetime(edf.get('evaluated_at', edf.get('evaluation_time')), errors='coerce', utc=True)
+    edf = edf.dropna(subset=['evaluated_at']).copy()
+
+    # Filters
+    if asset_filter != 'All' and 'asset' in edf.columns:
+        edf = edf[edf['asset'] == asset_filter]
+
+    if horizon_filter != 'All' and 'horizon_minutes' in edf.columns:
+        hm_map = {'15m': 15, '60m': 60, '6h': 360, '12h': 720, '36h': 2160, '48h': 2880, '72h': 4320}
+        hm = hm_map.get(horizon_filter)
+        if hm is not None:
+            edf = edf[pd.to_numeric(edf['horizon_minutes'], errors='coerce').fillna(-1).astype(int) == int(hm)]
+
+    if edf.empty:
+        st.info("No evaluated forecasts match the selected filters.")
+    else:
+        # Compute predicted/actual returns vs entry (price_at_forecast)
+        entry = pd.to_numeric(edf.get('price_at_forecast'), errors='coerce')
+        pred = pd.to_numeric(edf.get('predicted_price'), errors='coerce')
+        actual = pd.to_numeric(edf.get('actual_price', edf.get('price_at_evaluation')), errors='coerce')
+
+        edf['predicted_return_pct'] = ((pred - entry) / entry) * 100.0
+        edf['actual_return_pct'] = ((actual - entry) / entry) * 100.0
+        edf['date'] = edf['evaluated_at'].dt.date
+
+        daily = edf.groupby('date', as_index=False).agg(
+            predicted_return_pct=('predicted_return_pct', 'mean'),
+            actual_return_pct=('actual_return_pct', 'mean'),
+            n=('id', 'count') if 'id' in edf.columns else ('date', 'count'),
+        )
+
+        figs = performance_triplet(daily, date_col='date')
+        st.plotly_chart(figs['cumulative'], use_container_width=True)
+        st.plotly_chart(figs['daily'], use_container_width=True)
+        st.plotly_chart(figs['drawdown'], use_container_width=True)
 
 # Get all evaluated forecasts (dynamic column detection in DB layer)
 evaluated_forecasts = db.get_all_evaluated_forecasts(limit=1000)
