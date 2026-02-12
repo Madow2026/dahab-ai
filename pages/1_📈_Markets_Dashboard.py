@@ -87,6 +87,13 @@ def _safe_float(value, default: float = 0.0) -> float:
     try:
         if value is None or str(value) == "":
             return default
+        if isinstance(value, str):
+            s = value.strip()
+            # Handle common formatted numbers like "4,938.70".
+            s = s.replace(",", "")
+            # Remove currency symbols if present.
+            s = s.replace("$", "").replace("£", "").replace("€", "")
+            value = s
         return float(value)
     except Exception:
         return default
