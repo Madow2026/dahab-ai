@@ -5,7 +5,7 @@ AUTO-REFRESHING - Worker generates forecasts automatically
 """
 
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import math
 import sys
 import os
@@ -50,9 +50,29 @@ def _parse_dt(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value
     try:
-        return datetime.fromisoformat(str(value).strip())
+        s = str(value).strip()
+        # SQLite rows may contain timestamps like "2026-02-12T20:01:30Z".
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def _to_utc_naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """Normalize datetime for safe comparisons.
+
+    Streamlit Cloud + sqlite can produce a mix of timezone-aware and naive
+    datetimes. We normalize to naive UTC.
+    """
+    if not dt:
+        return None
+    try:
+        if getattr(dt, "tzinfo", None) is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except Exception:
+        return dt
 
 
 def _fmt_dt(dt: Optional[datetime]) -> str:
@@ -537,7 +557,8 @@ else:
                 status_html = '<span style="color:#96A0AF">Evaluated</span>'
         elif status == "active":
             # Check if overdue
-            if due_dt and due_dt < datetime.now():
+            due_cmp = _to_utc_naive(due_dt)
+            if due_cmp and due_cmp < datetime.utcnow():
                 status_html = '<span style="color:#E6C860">⏰ Overdue</span>'
             else:
                 status_html = '<span style="color:#60B0E6">⏳ Active</span>'
